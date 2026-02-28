@@ -1,6 +1,9 @@
 import argparse
 
-import gym
+try:
+    import gymnasium as gym
+except ImportError:  # pragma: no cover - fallback for legacy gym installs
+    import gym
 import supersuit as ss
 import torch
 import torch.nn.functional as F

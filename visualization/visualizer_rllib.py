@@ -12,10 +12,16 @@ import shelve
 import shutil
 from pathlib import Path
 
-import gym
+try:
+    import gymnasium as gym
+except ImportError:  # pragma: no cover - fallback for legacy gym installs
+    import gym
 import numpy as np
 import ray
-from ray.rllib.env import MultiAgentEnv
+try:
+    from ray.rllib.env.multi_agent_env import MultiAgentEnv
+except ImportError:  # pragma: no cover - fallback for legacy Ray versions
+    from ray.rllib.env import MultiAgentEnv
 from ray.rllib.env.base_env import _DUMMY_AGENT_ID
 from ray.rllib.evaluation.worker_set import WorkerSet
 from ray.rllib.models import ModelCatalog

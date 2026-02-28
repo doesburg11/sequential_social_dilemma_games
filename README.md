@@ -1,12 +1,16 @@
-[![Build Status](https://travis-ci.com/eugenevinitsky/sequential_social_dilemma_games.svg?branch=master)](https://travis-ci.com/eugenevinitsky/sequential_social_dilemma_games)
-
-# Deprecation Warning
-These environments were intended to reproduce an earlier version of melting pot that was not open sourced. You can find [Melting Pot](https://github.com/google-deepmind/meltingpot) at the link and we strongly recommend using it over this repo.
+[![Python 3.11.13](https://img.shields.io/badge/python-3.11.13-blue.svg)](https://www.python.org/downloads/release/python-31111/)
+[![RLlib](https://img.shields.io/badge/RLlib-v2.54.0-blue)](https://docs.ray.io/en/latest/rllib/)
 
 # Sequential Social Dilemma Games
-This repo is an open-source implementation of DeepMind's Sequential Social Dilemma (SSD) multi-agent game-theoretic environments [[1]](https://arxiv.org/abs/1702.03037). SSDs can be thought of as analogous to spatially and temporally extended Prisoner's Dilemma-like games. The reward structure poses a dilemma because individual short-term optimal strategies lead to poor long-term outcomes for the group.
+This repository is a Ray RLlib[[1]](#references) new API stack[[2]](#references) update (`Ray RLlib 2.54.0`) of the original `sequential_social_dilemma_games` codebase by Eugene Vinitsky and collaborators [[3]](#references) (`Ray RLlib 0.8.5`).
 
-The implemented environments are structured to be compatible with [OpenAIs gym environments](https://github.com/openai/gym) as well as [RLlib's Multiagent Environment](https://github.com/ray-project/ray/blob/master/rllib/env/multi_agent_env.py)
+It provides an open-source implementation of DeepMind's Sequential Social Dilemma (SSD) multi-agent environments [[4]](#reference). SSDs are spatially and temporally extended Prisoner's Dilemma-like games where individually optimal short-term behavior can harm long-term group outcomes.
+
+## What this repository does
+- Implements the **Cleanup** and **Harvest** SSD environments.
+- Exposes environment interfaces for **Gymnasium**, **PettingZoo**, and **RLlib MultiAgentEnv** workflows.
+- Includes training entry points for RLlib (`run_scripts/train.py`) and SB3-based baselines (`run_scripts/sb3_train.py`, `run_scripts/sb3_independent.py`).
+- Provides tests and visualization utilities for inspecting multi-agent behavior.
 
 ## Implemented Games
 
@@ -24,14 +28,14 @@ The above plot shows the empirical Schelling diagrams for both Cleanup (A) and H
 
 # Setup instructions
 To install the SSD environments:
-### Anaconda/miniconda
+### Anaconda/miniconda (repo-local env at `./.conda`)
 ```bash
 git clone -b master https://github.com/eugenevinitsky/sequential_social_dilemma_games
 cd sequential_social_dilemma_games
-conda create -n ssd python==3.8.10 # Create a conda virtual environment
-# Patch ray due to https://github.com/ray-project/ray/issues/7946
-# And https://github.com/ray-project/ray/pull/8491
-. conda_uint8_patch.sh
+conda env create --prefix ./.conda --file environment.yml
+conda activate "$(pwd)/.conda"
+# or:
+./run_scripts/create_local_conda_env.sh
 ```
 ###
 ```bash
@@ -42,9 +46,6 @@ python3 -m venv venv # Create a Python virtual environment
 pip3 install --upgrade pip setuptools wheel
 python3 setup.py develop
 pip3 install -r requirements.txt
-# Patch ray due to https://github.com/ray-project/ray/issues/7946
-# And https://github.com/ray-project/ray/pull/8491
-. venv_uint8_patch.sh
 ```
 
 To install sb3|rllib|all requirements for learning:
@@ -132,27 +133,30 @@ The below graphs display results for cleanup/harvest using un-tuned PPO in RLlib
 <img src="images/harvest_collective_reward.svg" alt="Collective reward plot of harvest" width="460.8" height="345.6"/>
 
 
-## Relevant papers
+## References
 
-1. Leibo, J. Z., Zambaldi, V., Lanctot, M., Marecki, J., & Graepel, T. (2017). [Multi-agent reinforcement learning in sequential social dilemmas](https://arxiv.org/abs/1702.03037). In Proceedings of the 16th Conference on Autonomous Agents and MultiAgent Systems (pp. 464-473).
+1. Ray Team. [RLlib (Ray Reinforcement Learning Library) documentation](https://docs.ray.io/en/latest/rllib/).
 
-2.  Hughes, E., Leibo, J. Z., Phillips, M., Tuyls, K., Dueñez-Guzman, E., Castañeda, A. G., Dunning, I., Zhu, T., McKee, K., Koster, R., Tina Zhu, Roff, H., Graepel, T. (2018). [Inequity aversion improves cooperation in intertemporal social dilemmas](https://arxiv.org/abs/1803.08884). In Advances in Neural Information Processing Systems (pp. 3330-3340).
+2. Ray Team. [What's the New API Stack?](https://docs.ray.io/en/latest/rllib/new-api-stack-migration-guide.html#what-s-the-new-api-stack).
 
-3. Jaques, N., Lazaridou, A., Hughes, E., Gulcehre, C., Ortega, P. A., Strouse, D. J., Leibo, J. Z. & de Freitas, N. (2018). [Intrinsic Social Motivation via Causal Influence in Multi-Agent RL](https://arxiv.org/abs/1810.08647). arXiv preprint arXiv:1810.08647.
-        
-# Contributors
+3. Vinitsky, E., Jaques, N., Leibo, J., Castañeda, A., Hughes, E., et al. [Sequential Social Dilemma Games (original repository)](https://github.com/eugenevinitsky/sequential_social_dilemma_games).
 
-This code base was initially developed by Eugene Vinitsky and Natasha Jaques; help with reproduction was provided by Joel Leibo, Antonio Castenada, and Edward Hughes. Additional development was done by Hugo Heemskerk. Support for PettingZoo was provided by Rohan Potdar.
+4. Leibo, J. Z., Zambaldi, V., Lanctot, M., Marecki, J., & Graepel, T. (2017). [Multi-agent reinforcement learning in sequential social dilemmas](https://arxiv.org/abs/1702.03037). In Proceedings of the 16th Conference on Autonomous Agents and MultiAgent Systems (pp. 464-473).
 
+5.  Hughes, E., Leibo, J. Z., Phillips, M., Tuyls, K., Dueñez-Guzman, E., Castañeda, A. G., Dunning, I., Zhu, T., McKee, K., Koster, R., Tina Zhu, Roff, H., Graepel, T. (2018). [Inequity aversion improves cooperation in intertemporal social dilemmas](https://arxiv.org/abs/1803.08884). In Advances in Neural Information Processing Systems (pp. 3330-3340).
+
+6. Jaques, N., Lazaridou, A., Hughes, E., Gulcehre, C., Ortega, P. A., Strouse, D. J., Leibo, J. Z. & de Freitas, N. (2018). [Intrinsic Social Motivation via Causal Influence in Multi-Agent RL](https://arxiv.org/abs/1810.08647). arXiv preprint arXiv:1810.08647.
+
+      
 # Citation
 
-If you want to cite this repository accademic work, please use the following citation:
+If you want to cite this repository, please use the following citation:
 
 ```
 @misc{SSDOpenSource,
-author = {[Vinitsky, Eugene and Jaques, Natasha and Leibo, Joel and Castenada, Antonio and Hughes, Edward]},
-title = {An Open Source Implementation of Sequential Social Dilemma Games},
-year = {2019},
+author = {[Van Doesburg, Peter]},
+title = {An Open Source Updated Implementation of Sequential Social Dilemma Games},
+year = {2026},
 publisher = {GitHub},
 note = {GitHub repository},
 howpublished = {\url{https://github.com/eugenevinitsky/sequential_social_dilemma_games/issues/182}}

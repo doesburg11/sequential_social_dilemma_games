@@ -1,7 +1,10 @@
 import math
 
 import numpy as np
-from ray.rllib.agents.callbacks import DefaultCallbacks
+try:
+    from ray.rllib.algorithms.callbacks import DefaultCallbacks
+except ImportError:  # pragma: no cover - fallback for legacy Ray versions
+    from ray.rllib.agents.callbacks import DefaultCallbacks
 
 from social_dilemmas.envs.agent import SwitchAgent
 from social_dilemmas.envs.gym.discrete_with_dtype import DiscreteWithDType
@@ -177,9 +180,14 @@ class SwitchEnv(MapEnv):
         return num_switches
 
     @staticmethod
-    def on_episode_end(info):
-        episode = info["episode"]
+    def on_episode_end(info=None, episode=None):
+        if episode is None and info is not None:
+            episode = info["episode"]
+        if episode is None:
+            return
         last_info = episode.last_info_for("agent-0")
+        if last_info is None:
+            return
         extra_info_keys = [
             "switches_on_at_termination",
             "total_pulled_on",
@@ -194,8 +202,11 @@ class SwitchEnv(MapEnv):
     @staticmethod
     def get_environment_callbacks():
         class SwitchCallback(DefaultCallbacks):
-            def on_episode_end(self, info):
-                super().on_episode_end(info)
-                SwitchEnv.on_episode_end(info)
+            def on_episode_end(self, *args, **kwargs):
+                super().on_episode_end(*args, **kwargs)
+                if "episode" in kwargs:
+                    SwitchEnv.on_episode_end(episode=kwargs["episode"])
+                elif args:
+                    SwitchEnv.on_episode_end(info=args[0])
 
         return SwitchCallback

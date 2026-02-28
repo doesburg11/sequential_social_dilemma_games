@@ -1,34 +1,199 @@
 import argparse
 import copy
+import inspect
 import sys
 from datetime import datetime
+from pathlib import Path
+
+# Allow running this script directly (e.g. VS Code "Run Python File")
+# without requiring `PYTHONPATH=.` in the shell.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np
 import pytz
 import ray
 from ray import tune
-from ray.rllib.agents.registry import get_agent_class
 from ray.rllib.models import ModelCatalog
-from ray.tune import Experiment
 from ray.tune.registry import register_env
 from ray.tune.schedulers import PopulationBasedTraining
 
-from algorithms.a3c_baseline import build_a3c_baseline_trainer
-from algorithms.a3c_moa import build_a3c_moa_trainer
-from algorithms.impala_baseline import build_impala_baseline_trainer
-from algorithms.impala_moa import build_impala_moa_trainer
-from algorithms.ppo_baseline import build_ppo_baseline_trainer
-from algorithms.ppo_moa import build_ppo_moa_trainer
-from algorithms.ppo_scm import build_ppo_scm_trainer
-from models.baseline_model import BaselineModel
-from models.moa_model import MOAModel
-from models.scm_model import SocialCuriosityModule
 from social_dilemmas.config.default_args import add_default_args
 from social_dilemmas.envs.env_creator import get_env_creator
 from utility_funcs import update_nested_dict
 
+try:
+    from ray.rllib.agents.registry import get_agent_class as _legacy_get_agent_class
+except ImportError:  # pragma: no cover - Ray >=2.x
+    _legacy_get_agent_class = None
+try:
+    from ray.rllib.env.multi_agent_env import MultiAgentEnv
+except ImportError:  # pragma: no cover - fallback for legacy Ray versions
+    from ray.rllib.env import MultiAgentEnv
+
 parser = argparse.ArgumentParser()
 add_default_args(parser)
+
+
+def get_agent_class(algorithm_name):
+    """Return RLlib algorithm class without triggering global trainable registration."""
+    if _legacy_get_agent_class is not None:
+        return _legacy_get_agent_class(algorithm_name)
+
+    algo = str(algorithm_name).upper()
+    if algo == "PPO":
+        from ray.rllib.algorithms.ppo import PPO
+
+        return PPO
+    if algo == "IMPALA":
+        from ray.rllib.algorithms.impala import IMPALA
+
+        return IMPALA
+    if algo == "A3C":
+        from ray.rllib.algorithms.a3c import A3C
+
+        return A3C
+
+    # Fallback for non-standard algorithm names.
+    from ray.tune.registry import get_trainable_cls
+
+    return get_trainable_cls(algorithm_name)
+
+
+def _maybe_register_custom_model(model_key, model_name):
+    try:
+        if model_key == "scm":
+            from models.scm_model import SocialCuriosityModule
+
+            ModelCatalog.register_custom_model(model_name, SocialCuriosityModule)
+        elif model_key == "moa":
+            from models.moa_model import MOAModel
+
+            ModelCatalog.register_custom_model(model_name, MOAModel)
+        elif model_key == "baseline":
+            from models.baseline_model import BaselineModel
+
+            ModelCatalog.register_custom_model(model_name, BaselineModel)
+        return True
+    except ImportError:
+        return False
+
+
+def _default_algorithm_config(agent_cls):
+    if hasattr(agent_cls, "_default_config"):
+        return copy.deepcopy(agent_cls._default_config)
+    if hasattr(agent_cls, "get_default_config"):
+        config = agent_cls.get_default_config()
+        if hasattr(config, "to_dict"):
+            config = config.to_dict()
+        return copy.deepcopy(config)
+    return {}
+
+
+class _RLlibEnvAdapter(MultiAgentEnv):
+    """Adapter for legacy MapEnv API to RLlib's expected Gymnasium-style API."""
+
+    def __init__(self, env, max_episode_steps=None):
+        self._env = env
+        self._max_episode_steps = (
+            int(max_episode_steps) if max_episode_steps is not None and max_episode_steps > 0 else None
+        )
+        self._elapsed_steps = 0
+        # MultiAgentEnv in modern RLlib defines these as None by default.
+        # Set them explicitly so policy specs have concrete spaces.
+        self.observation_space = env.observation_space
+        self.action_space = env.action_space
+
+    def reset(self, *, seed=None, options=None):
+        self._elapsed_steps = 0
+        try:
+            obs = self._env.reset(seed=seed, options=options)
+        except TypeError:
+            obs = self._env.reset()
+        if isinstance(obs, tuple) and len(obs) == 2:
+            return obs
+        infos = {agent_id: {} for agent_id in obs.keys()} if isinstance(obs, dict) else {}
+        return obs, infos
+
+    def step(self, action_dict):
+        out = self._env.step(action_dict)
+        self._elapsed_steps += 1
+        if isinstance(out, tuple) and len(out) == 5:
+            obs, rewards, terminations, truncations, infos = out
+            if self._max_episode_steps is not None and self._elapsed_steps >= self._max_episode_steps:
+                terminations = dict(terminations)
+                truncations = dict(truncations)
+                agent_ids = set(obs.keys()) | set(rewards.keys()) | {
+                    agent_id for agent_id in terminations.keys() if agent_id != "__all__"
+                }
+                for agent_id in agent_ids:
+                    terminations.setdefault(agent_id, False)
+                    truncations[agent_id] = truncations.get(agent_id, False) or (
+                        not terminations[agent_id]
+                    )
+                terminations.setdefault("__all__", False)
+                truncations["__all__"] = True
+            return obs, rewards, terminations, truncations, infos
+        obs, rewards, dones, infos = out
+        all_done = bool(dones.get("__all__", False))
+        terminations = {agent_id: done for agent_id, done in dones.items() if agent_id != "__all__"}
+        truncations = {agent_id: False for agent_id in terminations.keys()}
+        horizon_reached = (
+            self._max_episode_steps is not None and self._elapsed_steps >= self._max_episode_steps
+        )
+        if all_done:
+            terminations = {agent_id: True for agent_id in terminations.keys()}
+        if horizon_reached and not all_done:
+            for agent_id in terminations.keys():
+                if not terminations[agent_id]:
+                    truncations[agent_id] = True
+        terminations["__all__"] = all_done
+        truncations["__all__"] = horizon_reached and not all_done
+        return obs, rewards, terminations, truncations, infos
+
+    def __getattr__(self, item):
+        return getattr(self._env, item)
+
+
+def _normalize_builtin_rllib_config(config):
+    # RLlib 2.54+ renamed worker concepts to env runner concepts.
+    renames = {
+        "num_workers": "num_env_runners",
+        "num_envs_per_worker": "num_envs_per_env_runner",
+        "num_cpus_per_worker": "num_cpus_per_env_runner",
+        "num_gpus_per_worker": "num_gpus_per_env_runner",
+    }
+    for old_key, new_key in renames.items():
+        if old_key in config:
+            # Prefer explicit legacy CLI-sourced values over defaults in new keys.
+            config[new_key] = config[old_key]
+            config.pop(old_key, None)
+
+    if "num_cpus_for_driver" in config:
+        config["num_cpus_for_main_process"] = config.pop("num_cpus_for_driver")
+
+    if "callbacks" in config and "callbacks_class" not in config:
+        config["callbacks_class"] = config.pop("callbacks")
+
+    # Ray can drop an empty main-process bundle from the placement group
+    # when this is 0, which breaks env-runner bundle indexing.
+    if (
+        config.get("num_env_runners", 0) > 0
+        and config.get("num_cpus_for_main_process", 0) <= 0
+        and config.get("num_gpus", 0) <= 0
+    ):
+        config["num_cpus_for_main_process"] = 1
+
+    # Keep only the modern key for built-in PPO config.
+    if "sgd_minibatch_size" in config and "minibatch_size" in config:
+        config.pop("sgd_minibatch_size", None)
+
+    model_config = config.get("model", {})
+    if isinstance(model_config, dict) and model_config.get("custom_model") in (None, ""):
+        model_config.pop("custom_options", None)
+
+    return config
 
 
 def build_experiment_config_dict(args):
@@ -37,45 +202,58 @@ def build_experiment_config_dict(args):
     :param args: The parsed arguments.
     :return: An Experiment config dict.
     """
-    env_creator = get_env_creator(
-        args.env, args.num_agents, args.use_collective_reward, args.num_switches
+    episode_horizon = 1000
+    base_env_creator = get_env_creator(
+        env=args.env,
+        num_agents=args.num_agents,
+        use_collective_reward=args.use_collective_reward,
+        num_switches=args.num_switches,
     )
+
+    def env_creator(env_config):
+        max_episode_steps = episode_horizon
+        if isinstance(env_config, dict):
+            max_episode_steps = env_config.get("max_episode_steps", episode_horizon)
+        return _RLlibEnvAdapter(base_env_creator(env_config), max_episode_steps=max_episode_steps)
+
     env_name = args.env + "_env"
     register_env(env_name, env_creator)
 
-    single_env = env_creator(args.num_agents)
+    single_env = env_creator({"max_episode_steps": episode_horizon})
     obs_space = single_env.observation_space
     act_space = single_env.action_space
 
     model_name = args.model + "_lstm"
-    if args.model == "scm":
-        ModelCatalog.register_custom_model(model_name, SocialCuriosityModule)
-    elif args.model == "moa":
-        ModelCatalog.register_custom_model(model_name, MOAModel)
-    elif args.model == "baseline":
-        ModelCatalog.register_custom_model(model_name, BaselineModel)
+    use_custom_model = _maybe_register_custom_model(args.model, model_name)
 
     # Each policy can have a different configuration (including custom model)
     def gen_policy():
-        return None, obs_space, act_space, {"custom_model": model_name}
+        if use_custom_model:
+            return None, obs_space, act_space, {"custom_model": model_name}
+        return None, obs_space, act_space, {}
 
     # Create 1 distinct policy per agent
     policy_graphs = {}
     for i in range(args.num_agents):
         policy_graphs["agent-" + str(i)] = gen_policy()
 
-    def policy_mapping_fn(agent_id):
+    def policy_mapping_fn(agent_id, *args, **kwargs):
         return agent_id
 
     agent_cls = get_agent_class(args.algorithm)
-    config = copy.deepcopy(agent_cls._default_config)
+    config = _default_algorithm_config(agent_cls)
 
     config["env"] = env_name
     config["eager"] = args.eager_mode
+    # Keep RLlib on the old API stack for this legacy codebase.
+    config["enable_rl_module_and_learner"] = False
+    config["enable_env_runner_and_connector_v2"] = False
 
     # information for replay
-    config["env_config"]["func_create"] = env_creator
+    config.setdefault("env_config", {})
+    config["env_config"]["func_create"] = base_env_creator
     config["env_config"]["env_name"] = env_name
+    config["env_config"]["max_episode_steps"] = episode_horizon
     if env_name == "switch_env":
         config["env_config"]["num_switches"] = args.num_switches
 
@@ -99,7 +277,7 @@ def build_experiment_config_dict(args):
     update_nested_dict(
         config,
         {
-            "horizon": 1000,
+            "horizon": episode_horizon,
             "gamma": 0.99,
             "lr": args.lr,
             "lr_schedule": lr_schedule,
@@ -110,13 +288,15 @@ def build_experiment_config_dict(args):
             "num_gpus": args.gpus_for_driver,  # The number of GPUs for the driver
             "num_cpus_for_driver": args.cpus_for_driver,
             "num_gpus_per_worker": args.gpus_per_worker,  # Can be a fraction
+            "num_gpus_per_env_runner": args.gpus_per_worker,
+            "num_gpus_per_learner": 0,
+            "num_gpus_per_offline_eval_runner": 0,
             "num_cpus_per_worker": args.cpus_per_worker,  # Can be a fraction
             "entropy_coeff": args.entropy_coeff,
             "grad_clip": args.grad_clip,
             "multiagent": {"policies": policy_graphs, "policy_mapping_fn": policy_mapping_fn},
             "callbacks": single_env.get_environment_callbacks(),
             "model": {
-                "custom_model": model_name,
                 "use_lstm": False,
                 "conv_filters": conv_filters,
                 "fcnet_hiddens": fcnet_hiddens,
@@ -127,6 +307,9 @@ def build_experiment_config_dict(args):
             },
         },
     )
+
+    if use_custom_model:
+        config["model"]["custom_model"] = model_name
 
     if args.model != "baseline":
         config["model"]["custom_options"].update(
@@ -165,7 +348,10 @@ def build_experiment_config_dict(args):
                 "num_sgd_iter": 10,
                 "sgd_minibatch_size": args.ppo_sgd_minibatch_size
                 if args.ppo_sgd_minibatch_size is not None
-                else train_batch_size / 4,
+                else int(train_batch_size / 4),
+                "minibatch_size": args.ppo_sgd_minibatch_size
+                if args.ppo_sgd_minibatch_size is not None
+                else int(train_batch_size / 4),
                 "vf_loss_coeff": 1e-4,
                 "vf_share_layers": True,
             }
@@ -185,25 +371,49 @@ def get_trainer(args, config):
     :param config: The config dict that is provided to the trainer.
     :return: A new trainer.
     """
+    trainer = None
     if args.model == "baseline":
         if args.algorithm == "A3C":
-            trainer = build_a3c_baseline_trainer(config)
+            try:
+                from algorithms.a3c_baseline import build_a3c_baseline_trainer
+
+                trainer = build_a3c_baseline_trainer(config)
+            except ImportError:
+                trainer = get_agent_class("A3C")
         if args.algorithm == "PPO":
-            trainer = build_ppo_baseline_trainer(config)
+            try:
+                from algorithms.ppo_baseline import build_ppo_baseline_trainer
+
+                trainer = build_ppo_baseline_trainer(config)
+            except ImportError:
+                trainer = get_agent_class("PPO")
         if args.algorithm == "IMPALA":
-            trainer = build_impala_baseline_trainer(config)
+            try:
+                from algorithms.impala_baseline import build_impala_baseline_trainer
+
+                trainer = build_impala_baseline_trainer(config)
+            except ImportError:
+                trainer = get_agent_class("IMPALA")
     elif args.model == "moa":
         if args.algorithm == "A3C":
+            from algorithms.a3c_moa import build_a3c_moa_trainer
+
             trainer = build_a3c_moa_trainer(config)
         if args.algorithm == "PPO":
+            from algorithms.ppo_moa import build_ppo_moa_trainer
+
             trainer = build_ppo_moa_trainer(config)
         if args.algorithm == "IMPALA":
+            from algorithms.impala_moa import build_impala_moa_trainer
+
             trainer = build_impala_moa_trainer(config)
     elif args.model == "scm":
         if args.algorithm == "A3C":
             # trainer = build_a3c_scm_trainer(config)
             raise NotImplementedError
         if args.algorithm == "PPO":
+            from algorithms.ppo_scm import build_ppo_scm_trainer
+
             trainer = build_ppo_scm_trainer(config)
         if args.algorithm == "IMPALA":
             # trainer = build_impala_scm_trainer(config)
@@ -226,14 +436,117 @@ def initialize_ray(args):
         args.local_mode = True
     if args.multi_node and args.local_mode:
         sys.exit("You cannot have both local mode and multi node on at the same time")
-    ray.init(
-        address=args.address,
-        local_mode=args.local_mode,
-        memory=args.memory,
-        object_store_memory=args.object_store_memory,
-        redis_max_memory=args.redis_max_memory,
-        include_webui=False,
+    init_kwargs = {"address": args.address, "local_mode": args.local_mode}
+    if args.memory is not None:
+        init_kwargs["memory"] = args.memory
+    if args.object_store_memory is not None:
+        init_kwargs["object_store_memory"] = args.object_store_memory
+    if args.redis_max_memory is not None:
+        init_kwargs["redis_max_memory"] = args.redis_max_memory
+
+    # Ray 2.x renamed include_webui -> include_dashboard.
+    init_kwargs["include_dashboard"] = False
+
+    try:
+        ray.init(**init_kwargs)
+    except TypeError:
+        init_kwargs.pop("memory", None)
+        init_kwargs.pop("redis_max_memory", None)
+        ray.init(**init_kwargs)
+
+
+def _adjust_gpu_config_to_cluster(config):
+    """Keep RLlib GPU settings aligned with available cluster GPUs."""
+    cluster_gpus = float(ray.cluster_resources().get("GPU", 0.0))
+    local_gpus = 0.0
+    framework_visible_gpus = None
+    try:
+        # Use Ray's accelerator managers to detect physically available local GPUs.
+        # This guards against clusters reporting logical GPU resources on CPU-only hosts.
+        from ray._private.accelerators import (
+            AMDGPUAcceleratorManager,
+            IntelGPUAcceleratorManager,
+            MetaxGPUAcceleratorManager,
+            NvidiaGPUAcceleratorManager,
+        )
+
+        local_gpus = float(
+            max(
+                NvidiaGPUAcceleratorManager.get_current_node_num_accelerators(),
+                IntelGPUAcceleratorManager.get_current_node_num_accelerators(),
+                AMDGPUAcceleratorManager.get_current_node_num_accelerators(),
+                MetaxGPUAcceleratorManager.get_current_node_num_accelerators(),
+            )
+        )
+    except Exception:
+        local_gpus = 0.0
+
+    framework = str(config.get("framework", "")).lower()
+    if framework == "torch":
+        try:
+            import torch
+
+            framework_visible_gpus = float(torch.cuda.device_count())
+        except Exception:
+            framework_visible_gpus = 0.0
+    elif framework in ("tf", "tf2"):
+        try:
+            import tensorflow as tf
+
+            framework_visible_gpus = float(len(tf.config.list_physical_devices("GPU")))
+        except Exception:
+            framework_visible_gpus = 0.0
+
+    effective_gpus = min(cluster_gpus, local_gpus) if local_gpus >= 0 else cluster_gpus
+    if framework_visible_gpus is not None:
+        effective_gpus = min(effective_gpus, framework_visible_gpus)
+
+    # Keep legacy and modern keys consistent.
+    if "num_gpus_per_worker" in config and "num_gpus_per_env_runner" not in config:
+        config["num_gpus_per_env_runner"] = config["num_gpus_per_worker"]
+
+    gpu_keys = (
+        "num_gpus",
+        "num_gpus_per_worker",
+        "num_gpus_per_env_runner",
+        "num_gpus_per_learner",
+        "num_gpus_per_offline_eval_runner",
     )
+
+    requested = {k: float(config.get(k, 0) or 0.0) for k in gpu_keys}
+    if effective_gpus <= 0:
+        if any(value > 0 for value in requested.values()):
+            print(
+                "No usable local GPUs detected. Overriding GPU config to CPU-only: "
+                f"(cluster_gpus={cluster_gpus}, local_gpus={local_gpus}) "
+                + (
+                    ""
+                    if framework_visible_gpus is None
+                    else f"(framework_visible_gpus={framework_visible_gpus}) "
+                )
+                + f"{ {k: v for k, v in requested.items() if v > 0} }"
+            )
+        config["num_gpus"] = 0
+        config["num_gpus_per_env_runner"] = 0
+        config["num_gpus_per_learner"] = 0
+        config["num_gpus_per_offline_eval_runner"] = 0
+        config.pop("num_gpus_per_worker", None)
+        return config
+
+    # Cap driver GPU request to available resources.
+    if requested["num_gpus"] > effective_gpus:
+        print(
+            f"Requested num_gpus={requested['num_gpus']} but usable GPUs are {effective_gpus} "
+            f"(cluster_gpus={cluster_gpus}, local_gpus={local_gpus}). "
+            f"Capping num_gpus to {effective_gpus}."
+        )
+        config["num_gpus"] = effective_gpus
+
+    # Keep only the modern env-runner key; old key raises on modern RLlib.
+    if "num_gpus_per_env_runner" in config:
+        config.pop("num_gpus_per_worker", None)
+
+    return config
 
 
 def get_experiment_name(args):
@@ -265,6 +578,7 @@ def build_experiment_dict(args, experiment_name, trainer, config):
         "run": trainer,
         "stop": {},
         "checkpoint_freq": args.checkpoint_frequency,
+        "checkpoint_at_end": True,
         "config": config,
         "num_samples": args.num_samples,
         "max_failures": -1,
@@ -292,8 +606,13 @@ def create_experiment(args):
     experiment_name = get_experiment_name(args)
     config = build_experiment_config_dict(args)
     trainer = get_trainer(args=args, config=config)
+    is_builtin_rllib_trainer = isinstance(trainer, str) or (
+        inspect.isclass(trainer) and str(getattr(trainer, "__module__", "")).startswith("ray.rllib.")
+    )
+    if is_builtin_rllib_trainer:
+        config = _normalize_builtin_rllib_config(config)
     experiment_dict = build_experiment_dict(args, experiment_name, trainer, config)
-    return Experiment(**experiment_dict)
+    return experiment_dict
 
 
 def create_hparam_tune_dict(model, is_config=False):
@@ -363,14 +682,37 @@ def run(args, experiments):
     :param experiments: A list of experiments to run
     """
     initialize_ray(args)
-    scheduler = create_pbt_scheduler(args.model) if args.tune_hparams else None
-    tune.run_experiments(
-        experiments,
-        queue_trials=args.use_s3,
-        resume=args.resume,
-        scheduler=scheduler,
-        reuse_actors=args.tune_hparams,
+    experiments["config"] = _adjust_gpu_config_to_cluster(experiments["config"])
+    gpu_cfg_keys = (
+        "num_gpus",
+        "num_gpus_per_env_runner",
+        "num_gpus_per_learner",
+        "num_gpus_per_offline_eval_runner",
     )
+    resolved_gpu_cfg = {k: experiments["config"].get(k, None) for k in gpu_cfg_keys}
+    print(f"Resolved RLlib GPU config: {resolved_gpu_cfg}")
+    scheduler = create_pbt_scheduler(args.model) if args.tune_hparams else None
+    run_kwargs = {
+        "name": experiments["name"],
+        "stop": experiments["stop"],
+        "checkpoint_freq": experiments["checkpoint_freq"],
+        "config": experiments["config"],
+        "num_samples": experiments["num_samples"],
+        "max_failures": experiments["max_failures"],
+        "resume": args.resume,
+        "scheduler": scheduler,
+        "reuse_actors": args.tune_hparams,
+    }
+
+    supported_args = set(inspect.signature(tune.run).parameters.keys())
+    if "checkpoint_at_end" in supported_args:
+        run_kwargs["checkpoint_at_end"] = experiments.get("checkpoint_at_end", True)
+    if "queue_trials" in supported_args:
+        run_kwargs["queue_trials"] = args.use_s3
+    if "upload_dir" in supported_args and experiments.get("upload_dir") is not None:
+        run_kwargs["upload_dir"] = experiments.get("upload_dir")
+
+    tune.run(experiments["run"], **run_kwargs)
 
 
 if __name__ == "__main__":

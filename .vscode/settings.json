@@ -1,0 +1,21 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.conda/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "python.condaPath": "/home/doesburg/miniconda3/bin/conda",
+  "terminal.integrated.defaultProfile.linux": "Repo Conda",
+  "terminal.integrated.profiles.linux": {
+    "Repo Conda": {
+      "path": "/bin/bash",
+      "args": [
+        "--rcfile",
+        "${workspaceFolder}/.vscode/bashrc_repo_conda.sh",
+        "-i"
+      ],
+      "env": {
+        "REPO_CONDA_PREFIX": "${workspaceFolder}/.conda"
+      }
+    }
+  },
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda"
+}

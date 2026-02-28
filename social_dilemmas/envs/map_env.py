@@ -3,9 +3,20 @@
 
 import matplotlib.pyplot as plt
 import numpy as np
-from gym.spaces import Box, Dict
-from ray.rllib.agents.callbacks import DefaultCallbacks
-from ray.rllib.env import MultiAgentEnv
+try:
+    from gymnasium.spaces import Box, Dict
+except ImportError:  # pragma: no cover - fallback for legacy gym installs
+    from gym.spaces import Box, Dict
+
+try:
+    from ray.rllib.algorithms.callbacks import DefaultCallbacks
+except ImportError:  # pragma: no cover - fallback for legacy Ray versions
+    from ray.rllib.agents.callbacks import DefaultCallbacks
+
+try:
+    from ray.rllib.env.multi_agent_env import MultiAgentEnv
+except ImportError:  # pragma: no cover - fallback for legacy Ray versions
+    from ray.rllib.env import MultiAgentEnv
 
 _MAP_ENV_ACTIONS = {
     "MOVE_LEFT": [0, -1],  # Move left
@@ -57,6 +68,14 @@ DEFAULT_COLOURS = {
 
 
 class MapEnv(MultiAgentEnv):
+    @property
+    def num_agents(self):
+        return self._num_agents
+
+    @num_agents.setter
+    def num_agents(self, value):
+        self._num_agents = value
+
     def __init__(
         self,
         ascii_map,
@@ -306,7 +325,7 @@ class MapEnv(MultiAgentEnv):
         dones["__all__"] = np.any(list(dones.values()))
         return observations, rewards, dones, infos
 
-    def reset(self):
+    def reset(self, *, seed=None, options=None):
         """Reset the environment.
 
         This method is performed in between rollouts. It resets the state of
@@ -318,6 +337,9 @@ class MapEnv(MultiAgentEnv):
             the initial observation of the space. The initial reward is assumed
             to be zero.
         """
+        if seed is not None:
+            self.seed(seed)
+
         self.beam_pos = []
         self.agents = {}
         self.setup_agents()

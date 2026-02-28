@@ -6,7 +6,10 @@ from __future__ import absolute_import, division, print_function
 
 import logging
 
-import gym
+try:
+    import gymnasium as gym
+except ImportError:  # pragma: no cover - fallback for legacy gym installs
+    import gym
 import numpy as np
 from ray.rllib.agents.impala import DEFAULT_CONFIG
 from ray.rllib.agents.impala.impala import (

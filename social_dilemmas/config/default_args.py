@@ -53,7 +53,7 @@ def add_default_args(parser):
     parser.add_argument(
         "--checkpoint_frequency",
         type=int,
-        default=100,
+        default=10,
         help="Number of steps before a checkpoint is saved.",
     )
     parser.add_argument(
@@ -85,9 +85,9 @@ def add_default_args(parser):
         "--redis_max_memory", type=int, default=None, help="Amount of memory for redis"
     )
 
-    parser.add_argument("--num_workers", type=int, default=4, help="Total number of workers")
+    parser.add_argument("--num_workers", type=int, default=31, help="Total number of workers")
     parser.add_argument(
-        "--cpus_for_driver", type=int, default=0, help="Number of CPUs used by the driver"
+        "--cpus_for_driver", type=int, default=1, help="Number of CPUs used by the driver"
     )
     parser.add_argument(
         "--gpus_for_driver", type=float, default=1, help="Number of GPUs used by the driver"
