@@ -15,12 +15,11 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
     requirements = fh.readlines()
 
 extras = {
-    "sb3": ["stable-baselines3"],
     "rllib": ["tensorflow>=2.6.0"],
     "dev": ["pytest", "black", "isort"],
 }
 
-extras["all"] = extras["sb3"] + extras["rllib"]
+extras["all"] = extras["rllib"] + extras["dev"]
 
 
 setup(

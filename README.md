@@ -9,7 +9,7 @@ It provides an open-source implementation of DeepMind's Sequential Social Dilemm
 ## What this repository does
 - Implements the **Cleanup** and **Harvest** SSD environments.
 - Exposes environment interfaces for **Gymnasium**, **PettingZoo**, and **RLlib MultiAgentEnv** workflows.
-- Includes training entry points for RLlib (`run_scripts/train.py`) and SB3-based baselines (`run_scripts/sb3_train.py`, `run_scripts/sb3_independent.py`).
+- Includes RLlib training entry points via `run_scripts/train.py`.
 - Provides tests and visualization utilities for inspecting multi-agent behavior.
 
 ## Implemented Games
@@ -48,9 +48,9 @@ python3 setup.py develop
 pip3 install -r requirements.txt
 ```
 
-To install sb3|rllib|all requirements for learning:
+To install RLlib requirements for learning:
 ```bash
-pip3 install social-dilemmas[sb3|rllib|all]
+pip3 install social-dilemmas[rllib]
 ```
 
 If using RLlib:
@@ -74,21 +74,6 @@ python3 run_scripts/train.py --algorithm IMPALA --model baseline --num_agents 5
 Many more options are available which can be found in [default_args.py](config/default_args.py). A collection of preconfigured training scripts can be found in [run_scripts](run_scripts). 
 
 Note that the RLlib initialization time can be rather high (up to 5 minutes) the more agents you use, and the more complex your used model is.
-
-- To train using [Stable-Baselines3](https://github.com/DLR-RM/stable-baselines3) and parameter shared PPO:
-```bash
-python3 run_scripts/sb3_train.py --env harvest --num_agents 5
-```
-
-- To train using [MARL-Baselines3](https://github.com/Rohan138/marl-baselines3) and independent PPO:
-```bash
-python3 run_scripts/sb3_independent.py --env harvest --num_agents 5
-```
-
-- To train using [MARL-Baselines3](https://github.com/Rohan138/marl-baselines3) and independent PPO with inequity aversion:
-```bash
-python3 run_scripts/sb3_independent.py --env harvest --num_agents 5 --inequity-averse-reward=True --alpha=5.0 --beta=0.05
-```
 
 # CUDA, cuDNN and tensorflow-gpu
 
