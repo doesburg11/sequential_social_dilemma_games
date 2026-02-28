@@ -144,6 +144,9 @@ class MapEnv(MultiAgentEnv):
                 elif self.base_map[row, col] == b"@":
                     self.wall_points.append([row, col])
         self.setup_agents()
+        self._render_fig = None
+        self._render_ax = None
+        self._render_im = None
 
     @property
     def observation_space(self):
@@ -491,12 +494,34 @@ class MapEnv(MultiAgentEnv):
         """
         rgb_arr = self.full_map_to_colors()
         if mode == "human":
-            plt.cla()
-            plt.imshow(rgb_arr, interpolation="nearest")
+            plt.ion()
             if filename is None:
-                plt.show(block=False)
+                needs_init = (
+                    self._render_fig is None
+                    or self._render_ax is None
+                    or self._render_im is None
+                    or not plt.fignum_exists(self._render_fig.number)
+                )
+                if needs_init:
+                    self._render_fig, self._render_ax = plt.subplots()
+                    self._render_im = self._render_ax.imshow(rgb_arr, interpolation="nearest")
+                    self._render_ax.set_axis_off()
+                    self._render_fig.tight_layout(pad=0)
+                    plt.show(block=False)
+                else:
+                    self._render_im.set_data(rgb_arr)
+                    self._render_fig.canvas.draw_idle()
+
+                # Pump GUI events so interactive windows appear and update.
+                self._render_fig.canvas.flush_events()
+                plt.pause(0.001)
             else:
-                plt.savefig(filename)
+                fig, ax = plt.subplots()
+                ax.imshow(rgb_arr, interpolation="nearest")
+                ax.set_axis_off()
+                fig.tight_layout(pad=0)
+                fig.savefig(filename)
+                plt.close(fig)
             return None
         return rgb_arr
 

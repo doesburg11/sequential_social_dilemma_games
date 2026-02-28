@@ -9,7 +9,7 @@ def add_default_args(parser):
     parser.add_argument(
         "--env",
         type=str,
-        default="cleanup",
+        default="harvest",
         help="Name of the environment to use. Can be switch, cleanup or harvest.",
     )
     parser.add_argument(
@@ -35,7 +35,12 @@ def add_default_args(parser):
         default=None,
         help="path to checkpoint",
     )
-    parser.add_argument("--num_agents", type=int, default=2, help="Number of agent policies")
+    parser.add_argument(
+        "--num_agents", 
+        type=int, 
+        default=5, 
+        help="Number of agent policies"
+    )
     parser.add_argument(
         "--rollout_fragment_length",
         type=int,
@@ -260,7 +265,7 @@ def add_default_args(parser):
         type=int,
         default=None,
         help="Minibatch size for the stochastic gradient descent step in the PPO algorithm. If not"
-        "specified, uses run_scripts/config/ppo_config.py.",
+        "specified, uses config/ppo_config.py.",
     )
 
     # Env-specific parameters

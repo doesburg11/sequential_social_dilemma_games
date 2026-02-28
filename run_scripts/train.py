@@ -1,6 +1,7 @@
 # ruff: noqa: E402
 import argparse
 import inspect
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -23,10 +24,11 @@ from ray.tune.schedulers import PopulationBasedTraining
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+REPO_RAY_RESULTS_DIR = str(REPO_ROOT / "ray_results")
 
-from social_dilemmas.config.default_args import add_default_args
+from config.default_args import add_default_args
 from social_dilemmas.envs.env_creator import get_env_creator
-from run_scripts.config.ppo_config import apply_ppo_training_config, resolve_config_ppo
+from config.ppo_config import apply_ppo_training_config, resolve_config_ppo
 from utility_funcs import update_nested_dict
 
 parser = argparse.ArgumentParser()
@@ -361,7 +363,7 @@ def initialize_ray(args):
     if sys.gettrace() is not None:
         print(
             "Debug mode detected through sys.gettrace(), turning on ray local mode. Saving"
-            " experiment under ray_results/debug_experiment"
+            f" experiment under {REPO_RAY_RESULTS_DIR}/debug_experiment"
         )
         args.local_mode = True
     if args.multi_node and args.local_mode:
@@ -614,6 +616,11 @@ def run(args, experiments):
     }
 
     supported_args = set(inspect.signature(tune.run).parameters.keys())
+    os.makedirs(REPO_RAY_RESULTS_DIR, exist_ok=True)
+    if "storage_path" in supported_args:
+        run_kwargs["storage_path"] = REPO_RAY_RESULTS_DIR
+    elif "local_dir" in supported_args:
+        run_kwargs["local_dir"] = REPO_RAY_RESULTS_DIR
     if "checkpoint_at_end" in supported_args:
         run_kwargs["checkpoint_at_end"] = experiments.get("checkpoint_at_end", True)
     if "queue_trials" in supported_args:

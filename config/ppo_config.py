@@ -5,7 +5,7 @@ This file is the manual PPO dashboard: all defaults are hardcoded numeric values
 
 # Edit these values directly for tuning.
 config_ppo = {
-    "max_iters": 100,
+    "max_iters": 10000,
     # Core learning
     "lr": 0.0001,
     "gamma": 0.99,
