@@ -4,7 +4,7 @@
 # Sequential Social Dilemma Games
 This repository is a Ray RLlib[[1]](#references) new API stack[[2]](#references) update (`Ray RLlib 2.54.0`) of the original `sequential_social_dilemma_games` codebase by Eugene Vinitsky and collaborators [[3]](#references) (`Ray RLlib 0.8.5`).
 
-It provides an open-source implementation of DeepMind's Sequential Social Dilemma (SSD) multi-agent environments [[4]](#reference). SSDs are spatially and temporally extended Prisoner's Dilemma-like games where individually optimal short-term behavior can harm long-term group outcomes.
+It provides an open-source implementation of DeepMind's Sequential Social Dilemma (SSD) multi-agent environments [[4]](#reference) [[5]](#reference) [[6]](#reference). SSDs are spatially and temporally extended Prisoner's Dilemma-like games where individually optimal short-term behavior can harm long-term group outcomes.
 
 ## What this repository does
 - Implements the **Cleanup** and **Harvest** SSD environments.
