@@ -159,6 +159,4 @@ title = {An Open Source Updated Implementation of Sequential Social Dilemma Game
 year = {2026},
 publisher = {GitHub},
 note = {GitHub repository},
-howpublished = {\url{https://github.com/eugenevinitsky/sequential_social_dilemma_games/issues/182}}
-}
 ```
