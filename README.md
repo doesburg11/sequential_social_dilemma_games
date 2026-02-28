@@ -64,10 +64,12 @@ After the setup, you can run experiments like so:
 python3 run_scripts/train.py
 ```
 
-- To train the MOA with 5 agents:
+- To train IMPALA on Cleanup with 5 agents:
 ```bash
-python3 run_scripts/train.py --model moa --num_agents 5
+python3 run_scripts/train.py --algorithm IMPALA --model baseline --num_agents 5
 ```
+
+`run_scripts/train.py` now uses RLlib's true New API Stack (`PPOConfig`/`IMPALAConfig` with RLModule/Learner and EnvRunner v2) and is pinned to `--model baseline` with `--algorithm` in `{PPO, IMPALA}`.
 
 Many more options are available which can be found in [default_args.py](config/default_args.py). A collection of preconfigured training scripts can be found in [run_scripts](run_scripts). 
 

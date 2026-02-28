@@ -5,6 +5,7 @@
 import argparse
 import collections
 import copy
+import importlib
 import json
 import os
 import pickle
@@ -13,9 +14,9 @@ import shutil
 from pathlib import Path
 
 try:
-    import gymnasium as gym
-except ImportError:  # pragma: no cover - fallback for legacy gym installs
-    import gym
+    gym = importlib.import_module("gymnasium")
+except Exception:  # pragma: no cover - fallback for legacy gym installs
+    gym = importlib.import_module("gym")
 import numpy as np
 import ray
 try:
@@ -26,8 +27,22 @@ from ray.rllib.env.base_env import _DUMMY_AGENT_ID
 from ray.rllib.evaluation.worker_set import WorkerSet
 from ray.rllib.models import ModelCatalog
 from ray.rllib.policy.sample_batch import DEFAULT_POLICY_ID
-from ray.rllib.utils.deprecation import deprecation_warning
-from ray.rllib.utils.space_utils import flatten_to_single_ndarray
+try:
+    deprecation_warning = getattr(
+        importlib.import_module("ray._common.deprecation"), "deprecation_warning"
+    )
+except Exception:  # pragma: no cover - fallback for older Ray versions
+    deprecation_warning = getattr(
+        importlib.import_module("ray.rllib.utils.deprecation"), "deprecation_warning"
+    )
+try:
+    flatten_to_single_ndarray = getattr(
+        importlib.import_module("ray.rllib.utils.spaces.space_utils"), "flatten_to_single_ndarray"
+    )
+except Exception:  # pragma: no cover - fallback for older Ray versions
+    flatten_to_single_ndarray = getattr(
+        importlib.import_module("ray.rllib.utils.space_utils"), "flatten_to_single_ndarray"
+    )
 from ray.tune.registry import get_trainable_cls, register_env
 from ray.tune.utils import merge_dicts
 

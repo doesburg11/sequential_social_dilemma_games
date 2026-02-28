@@ -16,13 +16,13 @@ def add_default_args(parser):
         "--algorithm",
         type=str,
         default="PPO",
-        help="Name of the rllib algorithm to use. Can be A3C or PPO.",
+        help="Name of the rllib algorithm to use. Supported: PPO or IMPALA.",
     )
     parser.add_argument(
         "--model",
         type=str,
         default="baseline",
-        help="Name of the model to use. Can be baseline, moa, or scm",
+        help="Name of the model to use. Supported: baseline.",
     )
     parser.add_argument(
         "--resume",
@@ -59,14 +59,20 @@ def add_default_args(parser):
     parser.add_argument(
         "--stop_at_timesteps_total",
         type=int,
-        default=int(5e6),
-        help="Experiment stops when this total amount of timesteps has been reached",
+        default=None,
+        help="Experiment stops when this total amount of timesteps has been reached (optional)",
     )
     parser.add_argument(
         "--stop_at_episode_reward_min",
         type=float,
         default=None,
         help="Experiment stops when this is the minimum episode reward within 1 iteration",
+    )
+    parser.add_argument(
+        "--stop_at_training_iteration",
+        type=int,
+        default=100,
+        help="Experiment stops after this many training iterations",
     )
     parser.add_argument(
         "--num_samples",
@@ -254,7 +260,7 @@ def add_default_args(parser):
         type=int,
         default=None,
         help="Minibatch size for the stochastic gradient descent step in the PPO algorithm. If not"
-        "specified, defaults to --train_batch_size / 2",
+        "specified, uses run_scripts/config/ppo_config.py.",
     )
 
     # Env-specific parameters

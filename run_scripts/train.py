@@ -1,9 +1,22 @@
+# ruff: noqa: E402
 import argparse
-import copy
 import inspect
 import sys
 from datetime import datetime
 from pathlib import Path
+
+import numpy as np
+import pytz
+import ray
+from gymnasium.spaces import Box
+from ray import tune
+from ray.rllib.algorithms.impala import IMPALA, IMPALAConfig
+from ray.rllib.algorithms.ppo import PPO, PPOConfig
+from ray.rllib.callbacks.callbacks import RLlibCallback
+from ray.rllib.env.multi_agent_env import MultiAgentEnv
+from ray.rllib.policy.policy import PolicySpec
+from ray.tune.registry import register_env
+from ray.tune.schedulers import PopulationBasedTraining
 
 # Allow running this script directly (e.g. VS Code "Run Python File")
 # without requiring `PYTHONPATH=.` in the shell.
@@ -11,84 +24,31 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import numpy as np
-import pytz
-import ray
-from ray import tune
-from ray.rllib.models import ModelCatalog
-from ray.tune.registry import register_env
-from ray.tune.schedulers import PopulationBasedTraining
-
 from social_dilemmas.config.default_args import add_default_args
 from social_dilemmas.envs.env_creator import get_env_creator
+from run_scripts.config.ppo_config import apply_ppo_training_config, resolve_config_ppo
 from utility_funcs import update_nested_dict
-
-try:
-    from ray.rllib.agents.registry import get_agent_class as _legacy_get_agent_class
-except ImportError:  # pragma: no cover - Ray >=2.x
-    _legacy_get_agent_class = None
-try:
-    from ray.rllib.env.multi_agent_env import MultiAgentEnv
-except ImportError:  # pragma: no cover - fallback for legacy Ray versions
-    from ray.rllib.env import MultiAgentEnv
 
 parser = argparse.ArgumentParser()
 add_default_args(parser)
 
 
-def get_agent_class(algorithm_name):
-    """Return RLlib algorithm class without triggering global trainable registration."""
-    if _legacy_get_agent_class is not None:
-        return _legacy_get_agent_class(algorithm_name)
-
+def get_algorithm_trainable(algorithm_name):
     algo = str(algorithm_name).upper()
     if algo == "PPO":
-        from ray.rllib.algorithms.ppo import PPO
-
         return PPO
     if algo == "IMPALA":
-        from ray.rllib.algorithms.impala import IMPALA
-
         return IMPALA
-    if algo == "A3C":
-        from ray.rllib.algorithms.a3c import A3C
-
-        return A3C
-
-    # Fallback for non-standard algorithm names.
-    from ray.tune.registry import get_trainable_cls
-
-    return get_trainable_cls(algorithm_name)
+    raise ValueError(f"Unsupported algorithm '{algorithm_name}'. Supported values: PPO, IMPALA.")
 
 
-def _maybe_register_custom_model(model_key, model_name):
-    try:
-        if model_key == "scm":
-            from models.scm_model import SocialCuriosityModule
-
-            ModelCatalog.register_custom_model(model_name, SocialCuriosityModule)
-        elif model_key == "moa":
-            from models.moa_model import MOAModel
-
-            ModelCatalog.register_custom_model(model_name, MOAModel)
-        elif model_key == "baseline":
-            from models.baseline_model import BaselineModel
-
-            ModelCatalog.register_custom_model(model_name, BaselineModel)
-        return True
-    except ImportError:
-        return False
-
-
-def _default_algorithm_config(agent_cls):
-    if hasattr(agent_cls, "_default_config"):
-        return copy.deepcopy(agent_cls._default_config)
-    if hasattr(agent_cls, "get_default_config"):
-        config = agent_cls.get_default_config()
-        if hasattr(config, "to_dict"):
-            config = config.to_dict()
-        return copy.deepcopy(config)
-    return {}
+def get_algorithm_config_builder(algorithm_name):
+    algo = str(algorithm_name).upper()
+    if algo == "PPO":
+        return PPOConfig()
+    if algo == "IMPALA":
+        return IMPALAConfig()
+    raise ValueError(f"Unsupported algorithm '{algorithm_name}'. Supported values: PPO, IMPALA.")
 
 
 class _RLlibEnvAdapter(MultiAgentEnv):
@@ -96,23 +56,53 @@ class _RLlibEnvAdapter(MultiAgentEnv):
 
     def __init__(self, env, max_episode_steps=None):
         self._env = env
+        super().__init__()
         self._max_episode_steps = (
             int(max_episode_steps) if max_episode_steps is not None and max_episode_steps > 0 else None
         )
         self._elapsed_steps = 0
+        self._agent_obs_key = None
+        base_observation_space = env.observation_space
+        if hasattr(base_observation_space, "spaces") and "curr_obs" in base_observation_space.spaces:
+            self._agent_obs_key = "curr_obs"
+            base_observation_space = base_observation_space.spaces["curr_obs"]
+        if isinstance(base_observation_space, Box) and base_observation_space.dtype != np.float32:
+            base_observation_space = Box(
+                low=np.asarray(base_observation_space.low, dtype=np.float32),
+                high=np.asarray(base_observation_space.high, dtype=np.float32),
+                shape=base_observation_space.shape,
+                dtype=np.float32,
+            )
+        self.possible_agents = [f"agent-{i}" for i in range(int(getattr(env, "num_agents", 0)))]
+        self.agents = list(self.possible_agents)
+        # RLlib New API Stack expects per-agent spaces on multi-agent envs.
+        self.observation_spaces = {
+            agent_id: base_observation_space for agent_id in self.possible_agents
+        }
+        self.action_spaces = {agent_id: env.action_space for agent_id in self.possible_agents}
         # MultiAgentEnv in modern RLlib defines these as None by default.
         # Set them explicitly so policy specs have concrete spaces.
-        self.observation_space = env.observation_space
+        self.observation_space = base_observation_space
         self.action_space = env.action_space
+
+    def _convert_obs(self, obs):
+        def _convert_single(agent_obs):
+            if self._agent_obs_key is not None and isinstance(agent_obs, dict):
+                agent_obs = agent_obs.get(self._agent_obs_key, agent_obs)
+            if isinstance(agent_obs, np.ndarray) and agent_obs.dtype != np.float32:
+                agent_obs = agent_obs.astype(np.float32, copy=False)
+            return agent_obs
+
+        if isinstance(obs, dict):
+            return {agent_id: _convert_single(agent_obs) for agent_id, agent_obs in obs.items()}
+        return _convert_single(obs)
 
     def reset(self, *, seed=None, options=None):
         self._elapsed_steps = 0
-        try:
-            obs = self._env.reset(seed=seed, options=options)
-        except TypeError:
-            obs = self._env.reset()
+        obs = self._env.reset(seed=seed, options=options)
         if isinstance(obs, tuple) and len(obs) == 2:
-            return obs
+            return self._convert_obs(obs[0]), obs[1]
+        obs = self._convert_obs(obs)
         infos = {agent_id: {} for agent_id in obs.keys()} if isinstance(obs, dict) else {}
         return obs, infos
 
@@ -121,6 +111,7 @@ class _RLlibEnvAdapter(MultiAgentEnv):
         self._elapsed_steps += 1
         if isinstance(out, tuple) and len(out) == 5:
             obs, rewards, terminations, truncations, infos = out
+            obs = self._convert_obs(obs)
             if self._max_episode_steps is not None and self._elapsed_steps >= self._max_episode_steps:
                 terminations = dict(terminations)
                 truncations = dict(truncations)
@@ -136,6 +127,7 @@ class _RLlibEnvAdapter(MultiAgentEnv):
                 truncations["__all__"] = True
             return obs, rewards, terminations, truncations, infos
         obs, rewards, dones, infos = out
+        obs = self._convert_obs(obs)
         all_done = bool(dones.get("__all__", False))
         terminations = {agent_id: done for agent_id, done in dones.items() if agent_id != "__all__"}
         truncations = {agent_id: False for agent_id in terminations.keys()}
@@ -153,47 +145,53 @@ class _RLlibEnvAdapter(MultiAgentEnv):
         return obs, rewards, terminations, truncations, infos
 
     def __getattr__(self, item):
-        return getattr(self._env, item)
+        env = self.__dict__.get("_env")
+        if env is None:
+            raise AttributeError(item)
+        return getattr(env, item)
 
 
-def _normalize_builtin_rllib_config(config):
-    # RLlib 2.54+ renamed worker concepts to env runner concepts.
-    renames = {
-        "num_workers": "num_env_runners",
-        "num_envs_per_worker": "num_envs_per_env_runner",
-        "num_cpus_per_worker": "num_cpus_per_env_runner",
-        "num_gpus_per_worker": "num_gpus_per_env_runner",
+class _ResultNaNSanitizerCallback(RLlibCallback):
+    """Sanitize non-informative NaN/Inf metrics before Tune/TensorBoard logging."""
+
+    _NAN_SAFE_KEYS = {
+        "env_reset_timer",
+        "connector_pipeline_timer",
+        "num_trainable_parameters",
+        "num_non_trainable_parameters",
     }
-    for old_key, new_key in renames.items():
-        if old_key in config:
-            # Prefer explicit legacy CLI-sourced values over defaults in new keys.
-            config[new_key] = config[old_key]
-            config.pop(old_key, None)
 
-    if "num_cpus_for_driver" in config:
-        config["num_cpus_for_main_process"] = config.pop("num_cpus_for_driver")
+    @staticmethod
+    def _is_non_finite(value):
+        if isinstance(value, (float, np.floating)):
+            return not np.isfinite(value)
+        return False
 
-    if "callbacks" in config and "callbacks_class" not in config:
-        config["callbacks_class"] = config.pop("callbacks")
+    @classmethod
+    def _should_replace(cls, path_parts):
+        if not path_parts:
+            return False
+        leaf = path_parts[-1]
+        if leaf in cls._NAN_SAFE_KEYS:
+            return True
+        return "timers" in path_parts
 
-    # Ray can drop an empty main-process bundle from the placement group
-    # when this is 0, which breaks env-runner bundle indexing.
-    if (
-        config.get("num_env_runners", 0) > 0
-        and config.get("num_cpus_for_main_process", 0) <= 0
-        and config.get("num_gpus", 0) <= 0
-    ):
-        config["num_cpus_for_main_process"] = 1
+    @classmethod
+    def _sanitize_in_place(cls, obj, path_parts=()):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                obj[key] = cls._sanitize_in_place(value, path_parts + (str(key),))
+            return obj
+        if isinstance(obj, list):
+            for idx, value in enumerate(obj):
+                obj[idx] = cls._sanitize_in_place(value, path_parts + (str(idx),))
+            return obj
+        if cls._is_non_finite(obj) and cls._should_replace(path_parts):
+            return 0.0
+        return obj
 
-    # Keep only the modern key for built-in PPO config.
-    if "sgd_minibatch_size" in config and "minibatch_size" in config:
-        config.pop("sgd_minibatch_size", None)
-
-    model_config = config.get("model", {})
-    if isinstance(model_config, dict) and model_config.get("custom_model") in (None, ""):
-        model_config.pop("custom_options", None)
-
-    return config
+    def on_train_result(self, *, algorithm, result, **kwargs):
+        self._sanitize_in_place(result)
 
 
 def build_experiment_config_dict(args):
@@ -202,10 +200,21 @@ def build_experiment_config_dict(args):
     :param args: The parsed arguments.
     :return: An Experiment config dict.
     """
+    if args.model != "baseline":
+        raise ValueError(
+            f"Unsupported model '{args.model}' for the Ray RLlib 2.40+ stack. "
+            "Only 'baseline' is supported."
+        )
+    if args.eager_mode:
+        raise ValueError(
+            "--eager_mode is not supported in this torch-only RLlib New API Stack setup."
+        )
+
     episode_horizon = 1000
     base_env_creator = get_env_creator(
         env=args.env,
         num_agents=args.num_agents,
+        return_agent_actions=False,
         use_collective_reward=args.use_collective_reward,
         num_switches=args.num_switches,
     )
@@ -223,43 +232,28 @@ def build_experiment_config_dict(args):
     obs_space = single_env.observation_space
     act_space = single_env.action_space
 
-    model_name = args.model + "_lstm"
-    use_custom_model = _maybe_register_custom_model(args.model, model_name)
-
-    # Each policy can have a different configuration (including custom model)
-    def gen_policy():
-        if use_custom_model:
-            return None, obs_space, act_space, {"custom_model": model_name}
-        return None, obs_space, act_space, {}
-
-    # Create 1 distinct policy per agent
-    policy_graphs = {}
+    # Create 1 distinct policy spec per agent (independent policies).
+    policy_specs = {}
     for i in range(args.num_agents):
-        policy_graphs["agent-" + str(i)] = gen_policy()
+        policy_specs[f"agent-{i}"] = PolicySpec(
+            observation_space=obs_space,
+            action_space=act_space,
+            config={},
+        )
 
     def policy_mapping_fn(agent_id, *args, **kwargs):
         return agent_id
 
-    agent_cls = get_agent_class(args.algorithm)
-    config = _default_algorithm_config(agent_cls)
-
-    config["env"] = env_name
-    config["eager"] = args.eager_mode
-    # Keep RLlib on the old API stack for this legacy codebase.
-    config["enable_rl_module_and_learner"] = False
-    config["enable_env_runner_and_connector_v2"] = False
-
-    # information for replay
-    config.setdefault("env_config", {})
-    config["env_config"]["func_create"] = base_env_creator
-    config["env_config"]["env_name"] = env_name
-    config["env_config"]["max_episode_steps"] = episode_horizon
+    env_config = {
+        "func_create": base_env_creator,
+        "env_name": env_name,
+        "max_episode_steps": episode_horizon,
+    }
     if env_name == "switch_env":
-        config["env_config"]["num_switches"] = args.num_switches
+        env_config["num_switches"] = args.num_switches
 
     conv_filters = [[6, [3, 3], 1]]
     fcnet_hiddens = [32, 32]
-    lstm_cell_size = 128
 
     train_batch_size = (
         args.train_batch_size
@@ -273,154 +267,90 @@ def build_experiment_config_dict(args):
         else None
     )
 
-    # hyperparams
-    update_nested_dict(
-        config,
-        {
-            "horizon": episode_horizon,
-            "gamma": 0.99,
-            "lr": args.lr,
-            "lr_schedule": lr_schedule,
-            "rollout_fragment_length": args.rollout_fragment_length,
-            "train_batch_size": train_batch_size,
-            "num_workers": args.num_workers,
-            "num_envs_per_worker": args.num_envs_per_worker,
-            "num_gpus": args.gpus_for_driver,  # The number of GPUs for the driver
-            "num_cpus_for_driver": args.cpus_for_driver,
-            "num_gpus_per_worker": args.gpus_per_worker,  # Can be a fraction
-            "num_gpus_per_env_runner": args.gpus_per_worker,
-            "num_gpus_per_learner": 0,
-            "num_gpus_per_offline_eval_runner": 0,
-            "num_cpus_per_worker": args.cpus_per_worker,  # Can be a fraction
-            "entropy_coeff": args.entropy_coeff,
-            "grad_clip": args.grad_clip,
-            "multiagent": {"policies": policy_graphs, "policy_mapping_fn": policy_mapping_fn},
-            "callbacks": single_env.get_environment_callbacks(),
-            "model": {
+    algorithm_config = (
+        get_algorithm_config_builder(args.algorithm)
+        .framework("torch")
+        .environment(
+            env=env_name,
+            env_config=env_config,
+        )
+        .resources(
+            num_cpus_for_main_process=args.cpus_for_driver,
+            num_gpus=args.gpus_for_driver,
+        )
+        .env_runners(
+            num_env_runners=args.num_workers,
+            num_envs_per_env_runner=args.num_envs_per_worker,
+            rollout_fragment_length=args.rollout_fragment_length,
+            num_cpus_per_env_runner=args.cpus_per_worker,
+            num_gpus_per_env_runner=args.gpus_per_worker,
+        )
+        .learners(
+            num_learners=0,
+            # New API Stack trains on the Learner; any value >0 enables GPU training
+            # on the local Learner when num_learners=0.
+            num_gpus_per_learner=args.gpus_for_driver,
+        )
+        .multi_agent(
+            policies=policy_specs,
+            policy_mapping_fn=policy_mapping_fn,
+        )
+        .training(
+            gamma=0.99,
+            lr=args.lr,
+            lr_schedule=lr_schedule,
+            train_batch_size=train_batch_size,
+            entropy_coeff=args.entropy_coeff,
+            grad_clip=args.grad_clip,
+        )
+        .rl_module(
+            model_config={
                 "use_lstm": False,
                 "conv_filters": conv_filters,
                 "fcnet_hiddens": fcnet_hiddens,
-                "custom_options": {
-                    "cell_size": lstm_cell_size,
-                    "num_other_agents": args.num_agents - 1,
-                },
-            },
-        },
+            }
+        )
     )
+    callbacks_class = single_env.get_environment_callbacks()
+    callback_classes = [_ResultNaNSanitizerCallback]
+    if callbacks_class is not None:
+        if isinstance(callbacks_class, list):
+            callback_classes = callbacks_class + callback_classes
+        else:
+            callback_classes.insert(0, callbacks_class)
+    algorithm_config = algorithm_config.callbacks(callbacks_class=callback_classes)
 
-    if use_custom_model:
-        config["model"]["custom_model"] = model_name
-
-    if args.model != "baseline":
-        config["model"]["custom_options"].update(
-            {
-                "moa_loss_weight": args.moa_loss_weight,
-                "influence_reward_clip": 10,
-                "influence_reward_weight": args.influence_reward_weight,
-                "influence_reward_schedule_steps": args.influence_reward_schedule_steps,
-                "influence_reward_schedule_weights": args.influence_reward_schedule_weights,
-                "return_agent_actions": True,
-                "influence_divergence_measure": "kl",
-                "train_moa_only_when_visible": True,
-                "influence_only_when_visible": True,
-            }
+    if args.algorithm.upper() == "PPO":
+        algorithm_config = apply_ppo_training_config(
+            algorithm_config=algorithm_config,
+            args=args,
+            train_batch_size=train_batch_size,
         )
+    elif args.algorithm.upper() == "IMPALA":
+        algorithm_config = algorithm_config.training(vf_loss_coeff=0.1)
+    else:
+        raise ValueError("Unsupported algorithm. Supported algorithms for this stack: PPO, IMPALA.")
 
-    if args.model == "scm":
-        config["model"]["custom_options"].update(
-            {
-                "scm_loss_weight": args.scm_loss_weight,
-                "curiosity_reward_clip": 10,
-                "curiosity_reward_weight": args.curiosity_reward_weight,
-                "curiosity_reward_schedule_steps": args.curiosity_reward_schedule_steps,
-                "curiosity_reward_schedule_weights": args.curiosity_reward_schedule_weights,
-                "scm_forward_vs_inverse_loss_weight": args.scm_forward_vs_inverse_loss_weight,
-            }
-        )
-
+    config_dict = algorithm_config.to_dict()
     if args.tune_hparams:
         tune_dict = create_hparam_tune_dict(model=args.model, is_config=True)
-        update_nested_dict(config, tune_dict)
+        update_nested_dict(config_dict, tune_dict)
 
-    if args.algorithm == "PPO":
-        config.update(
-            {
-                "num_sgd_iter": 10,
-                "sgd_minibatch_size": args.ppo_sgd_minibatch_size
-                if args.ppo_sgd_minibatch_size is not None
-                else int(train_batch_size / 4),
-                "minibatch_size": args.ppo_sgd_minibatch_size
-                if args.ppo_sgd_minibatch_size is not None
-                else int(train_batch_size / 4),
-                "vf_loss_coeff": 1e-4,
-                "vf_share_layers": True,
-            }
-        )
-    elif args.algorithm == "A3C" or args.algorithm == "IMPALA":
-        config.update({"vf_loss_coeff": 0.1})
-    else:
-        sys.exit("The only available algorithms are A3C, PPO and IMPALA")
-
-    return config
+    return config_dict
 
 
-def get_trainer(args, config):
+def get_trainer(args):
     """
     Creates a trainer depending on what args are specified.
     :param args: The parsed arguments.
-    :param config: The config dict that is provided to the trainer.
     :return: A new trainer.
     """
-    trainer = None
-    if args.model == "baseline":
-        if args.algorithm == "A3C":
-            try:
-                from algorithms.a3c_baseline import build_a3c_baseline_trainer
-
-                trainer = build_a3c_baseline_trainer(config)
-            except ImportError:
-                trainer = get_agent_class("A3C")
-        if args.algorithm == "PPO":
-            try:
-                from algorithms.ppo_baseline import build_ppo_baseline_trainer
-
-                trainer = build_ppo_baseline_trainer(config)
-            except ImportError:
-                trainer = get_agent_class("PPO")
-        if args.algorithm == "IMPALA":
-            try:
-                from algorithms.impala_baseline import build_impala_baseline_trainer
-
-                trainer = build_impala_baseline_trainer(config)
-            except ImportError:
-                trainer = get_agent_class("IMPALA")
-    elif args.model == "moa":
-        if args.algorithm == "A3C":
-            from algorithms.a3c_moa import build_a3c_moa_trainer
-
-            trainer = build_a3c_moa_trainer(config)
-        if args.algorithm == "PPO":
-            from algorithms.ppo_moa import build_ppo_moa_trainer
-
-            trainer = build_ppo_moa_trainer(config)
-        if args.algorithm == "IMPALA":
-            from algorithms.impala_moa import build_impala_moa_trainer
-
-            trainer = build_impala_moa_trainer(config)
-    elif args.model == "scm":
-        if args.algorithm == "A3C":
-            # trainer = build_a3c_scm_trainer(config)
-            raise NotImplementedError
-        if args.algorithm == "PPO":
-            from algorithms.ppo_scm import build_ppo_scm_trainer
-
-            trainer = build_ppo_scm_trainer(config)
-        if args.algorithm == "IMPALA":
-            # trainer = build_impala_scm_trainer(config)
-            raise NotImplementedError
-    if trainer is None:
-        raise NotImplementedError("The provided combination of model and algorithm was not found.")
-    return trainer
+    if args.model != "baseline":
+        raise ValueError(
+            f"Unsupported model '{args.model}' for the Ray RLlib 2.40+ stack. "
+            "Only 'baseline' is supported."
+        )
+    return get_algorithm_trainable(args.algorithm)
 
 
 def initialize_ray(args):
@@ -447,67 +377,46 @@ def initialize_ray(args):
     # Ray 2.x renamed include_webui -> include_dashboard.
     init_kwargs["include_dashboard"] = False
 
-    try:
-        ray.init(**init_kwargs)
-    except TypeError:
-        init_kwargs.pop("memory", None)
-        init_kwargs.pop("redis_max_memory", None)
-        ray.init(**init_kwargs)
+    ray.init(**init_kwargs)
 
 
 def _adjust_gpu_config_to_cluster(config):
     """Keep RLlib GPU settings aligned with available cluster GPUs."""
     cluster_gpus = float(ray.cluster_resources().get("GPU", 0.0))
-    local_gpus = 0.0
-    framework_visible_gpus = None
-    try:
-        # Use Ray's accelerator managers to detect physically available local GPUs.
-        # This guards against clusters reporting logical GPU resources on CPU-only hosts.
-        from ray._private.accelerators import (
-            AMDGPUAcceleratorManager,
-            IntelGPUAcceleratorManager,
-            MetaxGPUAcceleratorManager,
-            NvidiaGPUAcceleratorManager,
+    # Use Ray's accelerator managers to detect physically available local GPUs.
+    # This guards against clusters reporting logical GPU resources on CPU-only hosts.
+    from ray._private.accelerators import (
+        AMDGPUAcceleratorManager,
+        IntelGPUAcceleratorManager,
+        MetaxGPUAcceleratorManager,
+        NvidiaGPUAcceleratorManager,
+    )
+
+    local_gpus = float(
+        max(
+            NvidiaGPUAcceleratorManager.get_current_node_num_accelerators(),
+            IntelGPUAcceleratorManager.get_current_node_num_accelerators(),
+            AMDGPUAcceleratorManager.get_current_node_num_accelerators(),
+            MetaxGPUAcceleratorManager.get_current_node_num_accelerators(),
+        )
+    )
+
+    framework = str(config.get("framework", "torch")).lower()
+    if framework not in ("", "torch"):
+        raise ValueError(
+            f"Unsupported framework '{framework}'. This stack supports only 'torch'."
         )
 
-        local_gpus = float(
-            max(
-                NvidiaGPUAcceleratorManager.get_current_node_num_accelerators(),
-                IntelGPUAcceleratorManager.get_current_node_num_accelerators(),
-                AMDGPUAcceleratorManager.get_current_node_num_accelerators(),
-                MetaxGPUAcceleratorManager.get_current_node_num_accelerators(),
-            )
-        )
-    except Exception:
-        local_gpus = 0.0
+    import torch
 
-    framework = str(config.get("framework", "")).lower()
-    if framework == "torch":
-        try:
-            import torch
-
-            framework_visible_gpus = float(torch.cuda.device_count())
-        except Exception:
-            framework_visible_gpus = 0.0
-    elif framework in ("tf", "tf2"):
-        try:
-            import tensorflow as tf
-
-            framework_visible_gpus = float(len(tf.config.list_physical_devices("GPU")))
-        except Exception:
-            framework_visible_gpus = 0.0
+    framework_visible_gpus = float(torch.cuda.device_count())
 
     effective_gpus = min(cluster_gpus, local_gpus) if local_gpus >= 0 else cluster_gpus
     if framework_visible_gpus is not None:
         effective_gpus = min(effective_gpus, framework_visible_gpus)
 
-    # Keep legacy and modern keys consistent.
-    if "num_gpus_per_worker" in config and "num_gpus_per_env_runner" not in config:
-        config["num_gpus_per_env_runner"] = config["num_gpus_per_worker"]
-
     gpu_keys = (
         "num_gpus",
-        "num_gpus_per_worker",
         "num_gpus_per_env_runner",
         "num_gpus_per_learner",
         "num_gpus_per_offline_eval_runner",
@@ -530,7 +439,6 @@ def _adjust_gpu_config_to_cluster(config):
         config["num_gpus_per_env_runner"] = 0
         config["num_gpus_per_learner"] = 0
         config["num_gpus_per_offline_eval_runner"] = 0
-        config.pop("num_gpus_per_worker", None)
         return config
 
     # Cap driver GPU request to available resources.
@@ -542,9 +450,15 @@ def _adjust_gpu_config_to_cluster(config):
         )
         config["num_gpus"] = effective_gpus
 
-    # Keep only the modern env-runner key; old key raises on modern RLlib.
-    if "num_gpus_per_env_runner" in config:
-        config.pop("num_gpus_per_worker", None)
+    # Cap learner GPU request to available resources.
+    if requested["num_gpus_per_learner"] > effective_gpus:
+        print(
+            "Requested "
+            f"num_gpus_per_learner={requested['num_gpus_per_learner']} but usable GPUs are "
+            f"{effective_gpus} (cluster_gpus={cluster_gpus}, local_gpus={local_gpus}). "
+            f"Capping num_gpus_per_learner to {effective_gpus}."
+        )
+        config["num_gpus_per_learner"] = effective_gpus
 
     return config
 
@@ -586,7 +500,21 @@ def build_experiment_dict(args, experiment_name, trainer, config):
     if args.stop_at_episode_reward_min is not None:
         experiment_dict["stop"]["episode_reward_min"] = args.stop_at_episode_reward_min
     if args.stop_at_timesteps_total is not None:
-        experiment_dict["stop"]["timesteps_total"] = args.stop_at_timesteps_total
+        # RLlib New Stack reports this counter instead of legacy `timesteps_total`.
+        experiment_dict["stop"]["num_env_steps_sampled_lifetime"] = args.stop_at_timesteps_total
+    training_iteration_stop = args.stop_at_training_iteration
+    if args.algorithm.upper() == "PPO":
+        ppo_train_batch_size = (
+            args.train_batch_size
+            if args.train_batch_size is not None
+            else max(1, args.num_workers) * args.num_envs_per_worker * args.rollout_fragment_length
+        )
+        training_iteration_stop = resolve_config_ppo(
+            args=args,
+            train_batch_size=ppo_train_batch_size,
+        )["max_iters"]
+    if training_iteration_stop is not None:
+        experiment_dict["stop"]["training_iteration"] = training_iteration_stop
 
     if args.use_s3:
         date = datetime.now(tz=pytz.utc)
@@ -605,12 +533,7 @@ def create_experiment(args):
     """
     experiment_name = get_experiment_name(args)
     config = build_experiment_config_dict(args)
-    trainer = get_trainer(args=args, config=config)
-    is_builtin_rllib_trainer = isinstance(trainer, str) or (
-        inspect.isclass(trainer) and str(getattr(trainer, "__module__", "")).startswith("ray.rllib.")
-    )
-    if is_builtin_rllib_trainer:
-        config = _normalize_builtin_rllib_config(config)
+    trainer = get_trainer(args=args)
     experiment_dict = build_experiment_dict(args, experiment_name, trainer, config)
     return experiment_dict
 
@@ -632,30 +555,16 @@ def create_hparam_tune_dict(model, is_config=False):
         else:
             return lambda: fn
 
-    baseline_options = {}
-    model_options = {}
-    if model == "baseline":
-        baseline_options = {
-            "entropy_coeff": wrapper(np.random.exponential(1 / 1000)),
-            "lr": wrapper(np.random.uniform(0.00001, 0.01)),
-        }
-    if model == "moa":
-        model_options = {
-            "moa_loss_weight": wrapper(np.random.exponential(1 / 15)),
-            "influence_reward_weight": wrapper(np.random.exponential(1)),
-        }
-    elif model == "scm":
-        model_options = {
-            "scm_loss_weight": wrapper(np.random.exponential(1 / 2)),
-            "curiosity_reward_weight": wrapper(np.random.exponential(1)),
-            "scm_forward_vs_inverse_loss_weight": wrapper(np.random.uniform(0, 1)),
-        }
+    if model != "baseline":
+        raise ValueError(
+            f"Unsupported model '{model}' for the Ray RLlib 2.40+ stack. "
+            "Only 'baseline' is supported."
+        )
 
-    hparam_dict = {
-        **baseline_options,
-        "model": {"custom_options": model_options},
+    return {
+        "entropy_coeff": wrapper(np.random.exponential(1 / 1000)),
+        "lr": wrapper(np.random.uniform(0.00001, 0.01)),
     }
-    return hparam_dict
 
 
 def create_pbt_scheduler(model):
