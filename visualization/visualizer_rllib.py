@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import pickle
+import re
 import shelve
 import shutil
 import sys
@@ -60,9 +61,13 @@ Example Usage via executable:
     --env CartPole-v0 --steps 1000000 --out rollouts.pkl
 """
 
-DEFAULT_DEBUG_CHECKPOINT = (
-    "/home/doesburg/ray_results/harvest_baseline_PPO/"
-    "PPO_harvest_env_77ba5_00000_0_2026-02-28_22-14-29/checkpoint_000005"
+DEFAULT_DEBUG_CHECKPOINT = "/home/doesburg/Projects/sequential_social_dilemma_games/ray_results/harvest_baseline_DQN/DQN_harvest_env_cfcf8_00000_0_2026-03-01_02-13-10/checkpoint_000000"
+DEFAULT_CHECKPOINT_SEARCH_DIRS = [
+    str(Path(__file__).resolve().parents[1] / "ray_results"),
+    str(Path.home() / "ray_results"),
+]
+DEFAULT_CHECKPOINT_DISPLAY_PREFIX = (
+    str(Path(__file__).resolve().parents[1] / "ray_results") + os.sep
 )
 DEFAULT_DEBUG_ARGS = [
     "--run",
@@ -76,6 +81,243 @@ DEFAULT_DEBUG_ARGS = [
     "--random-action-prob",
     "0.02",
 ]
+
+
+def _find_all_checkpoints(search_roots=None):
+    roots = search_roots or DEFAULT_CHECKPOINT_SEARCH_DIRS
+    found = []
+    seen = set()
+
+    for root in roots:
+        root_path = Path(root).expanduser().resolve()
+        if not root_path.exists():
+            continue
+        for checkpoint_path in root_path.rglob("checkpoint_*"):
+            if not checkpoint_path.is_dir():
+                continue
+            checkpoint_name = checkpoint_path.name
+            if not checkpoint_name.startswith("checkpoint_"):
+                continue
+            checkpoint_str = str(checkpoint_path)
+            if checkpoint_str in seen:
+                continue
+            try:
+                mtime = checkpoint_path.stat().st_mtime
+            except OSError:
+                continue
+            found.append((mtime, checkpoint_str))
+            seen.add(checkpoint_str)
+
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in found]
+
+
+def _hardcode_default_debug_checkpoint(selected_checkpoint):
+    script_path = Path(__file__).resolve()
+    script_text = script_path.read_text(encoding="utf-8")
+    escaped_path = selected_checkpoint.replace("\\", "\\\\").replace('"', '\\"')
+    replacement = f'DEFAULT_DEBUG_CHECKPOINT = "{escaped_path}"'
+    updated_text, num_subs = re.subn(
+        r'^DEFAULT_DEBUG_CHECKPOINT\s*=\s*".*"$',
+        replacement,
+        script_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if num_subs != 1:
+        raise RuntimeError(
+            "Could not update DEFAULT_DEBUG_CHECKPOINT in visualizer_rllib.py"
+        )
+    if updated_text != script_text:
+        script_path.write_text(updated_text, encoding="utf-8")
+
+
+def _select_checkpoint_gui(search_roots=None):
+    checkpoints = _find_all_checkpoints(search_roots=search_roots)
+    if not checkpoints:
+        return None, False
+
+    try:
+        import tkinter as tk
+        from tkinter import font as tkfont
+        from tkinter import messagebox
+    except Exception:
+        # Fallback to the newest checkpoint when Tk is unavailable.
+        return checkpoints[0], False
+
+    result = {"checkpoint": None, "hardcode": True}
+    filtered_paths = list(checkpoints)
+    display_index_to_path = {}
+
+    root = tk.Tk()
+    root.title("Select RLlib Checkpoint")
+    root.geometry("1700x760")
+    base_font = tkfont.nametofont("TkDefaultFont")
+    base_size = max(1, int(base_font.cget("size")))
+    big_size = max(12, base_size * 2)
+    big_font_bold = (base_font.cget("family"), big_size, "bold")
+    big_bold_font = (base_font.cget("family"), big_size, "bold")
+    list_font = big_font_bold
+
+    title = tk.Label(root, text="Checkpoint Picker (latest first)", font=big_bold_font)
+    title.pack(padx=10, pady=(10, 4), anchor="w")
+
+    info = tk.Label(
+        root,
+        text="Set a display prefix to shorten option text, then filter/click a checkpoint.",
+        justify="left",
+        font=big_font_bold,
+    )
+    info.pack(padx=10, pady=(0, 8), anchor="w")
+
+    prefix_label = tk.Label(root, text="Display Prefix (stripped from options):", font=big_font_bold)
+    prefix_label.pack(padx=10, pady=(0, 4), anchor="w")
+    prefix_var = tk.StringVar(value=DEFAULT_CHECKPOINT_DISPLAY_PREFIX)
+    prefix_entry = tk.Entry(root, textvariable=prefix_var, font=big_font_bold)
+    prefix_entry.pack(fill="x", padx=10, pady=(0, 8))
+
+    filter_label = tk.Label(root, text="Filter:", font=big_font_bold)
+    filter_label.pack(padx=10, pady=(0, 4), anchor="w")
+    filter_var = tk.StringVar()
+    filter_entry = tk.Entry(root, textvariable=filter_var, font=big_font_bold)
+    filter_entry.pack(fill="x", padx=10, pady=(0, 8))
+    filter_entry.focus_set()
+
+    list_frame = tk.Frame(root)
+    list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+    y_scroll = tk.Scrollbar(list_frame, orient="vertical")
+    y_scroll.pack(side="right", fill="y")
+    x_scroll = tk.Scrollbar(list_frame, orient="horizontal")
+    x_scroll.pack(side="bottom", fill="x")
+
+    checkpoint_list = tk.Listbox(
+        list_frame,
+        yscrollcommand=y_scroll.set,
+        xscrollcommand=x_scroll.set,
+        selectmode=tk.SINGLE,
+        font=list_font,
+        bg="#f6f8fc",
+        fg="#0f172a",
+        selectbackground="#1d4ed8",
+        selectforeground="#ffffff",
+        highlightthickness=1,
+        highlightbackground="#94a3b8",
+        activestyle="none",
+        exportselection=False,
+        width=180,
+        height=28,
+    )
+    checkpoint_list.pack(side="left", fill="both", expand=True)
+    y_scroll.config(command=checkpoint_list.yview)
+    x_scroll.config(command=checkpoint_list.xview)
+
+    hardcode_var = tk.BooleanVar(value=True)
+    hardcode_check = tk.Checkbutton(
+        root,
+        text="Hardcode selected checkpoint into DEFAULT_DEBUG_CHECKPOINT in this script",
+        variable=hardcode_var,
+        font=big_font_bold,
+    )
+    hardcode_check.pack(padx=10, pady=(0, 8), anchor="w")
+
+    selected_label_var = tk.StringVar(value="Selected: none")
+    selected_label = tk.Label(
+        root,
+        textvariable=selected_label_var,
+        justify="left",
+        font=big_font_bold,
+    )
+    selected_label.pack(padx=10, pady=(0, 8), anchor="w")
+
+    def _get_selected_path():
+        sel = checkpoint_list.curselection()
+        if not sel:
+            return None
+        idx = sel[0]
+        if idx in display_index_to_path:
+            return display_index_to_path[idx]
+
+        # If user selected spacer row, snap to nearest real option row.
+        for probe in (idx - 1, idx + 1):
+            if probe in display_index_to_path:
+                checkpoint_list.selection_clear(0, tk.END)
+                checkpoint_list.selection_set(probe)
+                checkpoint_list.activate(probe)
+                checkpoint_list.see(probe)
+                return display_index_to_path[probe]
+        return None
+
+    def refresh_list(*_):
+        nonlocal filtered_paths, display_index_to_path
+        query = filter_var.get().strip().lower()
+        display_prefix = os.path.expanduser(prefix_var.get().strip())
+        if display_prefix and not display_prefix.endswith(os.sep):
+            display_prefix = display_prefix + os.sep
+        if query:
+            filtered_paths = [p for p in checkpoints if query in p.lower()]
+        else:
+            filtered_paths = list(checkpoints)
+        checkpoint_list.delete(0, tk.END)
+        display_index_to_path = {}
+        for path in filtered_paths:
+            row_idx = checkpoint_list.size()
+            display_path = path
+            if display_prefix and path.startswith(display_prefix):
+                display_path = path[len(display_prefix) :]
+            checkpoint_list.insert(tk.END, display_path)
+            display_index_to_path[row_idx] = path
+            # Spacer row to make each option more distinguishable.
+            checkpoint_list.insert(tk.END, "")
+        if filtered_paths:
+            checkpoint_list.selection_clear(0, tk.END)
+            checkpoint_list.selection_set(0)
+            checkpoint_list.activate(0)
+            checkpoint_list.see(0)
+            selected_label_var.set(f"Selected: {filtered_paths[0]}")
+        else:
+            selected_label_var.set("Selected: none")
+
+    def update_selected_label(_event=None):
+        selected_path = _get_selected_path()
+        if not selected_path:
+            selected_label_var.set("Selected: none")
+            return
+        selected_label_var.set(f"Selected: {selected_path}")
+
+    def submit():
+        selected_path = _get_selected_path()
+        if not selected_path:
+            messagebox.showwarning("Checkpoint Picker", "Please select a checkpoint.")
+            return
+        result["checkpoint"] = selected_path
+        result["hardcode"] = bool(hardcode_var.get())
+        root.destroy()
+
+    def cancel():
+        root.destroy()
+
+    button_row = tk.Frame(root)
+    button_row.pack(fill="x", padx=10, pady=(0, 10))
+
+    run_button = tk.Button(
+        button_row, text="Run With Selected", command=submit, font=big_font_bold
+    )
+    run_button.pack(side="left")
+    cancel_button = tk.Button(button_row, text="Cancel", command=cancel, font=big_font_bold)
+    cancel_button.pack(side="left", padx=(8, 0))
+
+    prefix_var.trace_add("write", refresh_list)
+    filter_var.trace_add("write", refresh_list)
+    checkpoint_list.bind("<<ListboxSelect>>", update_selected_label)
+    checkpoint_list.bind("<Double-Button-1>", lambda _event: submit())
+    root.bind("<Return>", lambda _event: submit())
+    root.bind("<Escape>", lambda _event: cancel())
+
+    refresh_list()
+    root.mainloop()
+
+    return result["checkpoint"], result["hardcode"]
 
 # Note: if you use any custom models or envs, register them here first, e.g.:
 #
@@ -918,15 +1160,22 @@ def rollout(
 if __name__ == "__main__":
     parser = create_parser()
     if len(sys.argv) == 1:
-        if not os.path.exists(DEFAULT_DEBUG_CHECKPOINT):
+        selected_checkpoint, hardcode_selected = _select_checkpoint_gui(
+            search_roots=DEFAULT_CHECKPOINT_SEARCH_DIRS
+        )
+        checkpoint_to_use = selected_checkpoint or DEFAULT_DEBUG_CHECKPOINT
+        if not os.path.exists(checkpoint_to_use):
             parser.error(
-                "No CLI args given and default debug checkpoint was not found at: "
-                + DEFAULT_DEBUG_CHECKPOINT
+                "No CLI args given and no valid checkpoint was selected/found. "
+                f"Missing path: {checkpoint_to_use}"
             )
-        args = parser.parse_args([DEFAULT_DEBUG_CHECKPOINT, *DEFAULT_DEBUG_ARGS])
+        if selected_checkpoint and hardcode_selected:
+            _hardcode_default_debug_checkpoint(selected_checkpoint)
+            print(f"Hardcoded DEFAULT_DEBUG_CHECKPOINT to: {selected_checkpoint}")
+        args = parser.parse_args([checkpoint_to_use, *DEFAULT_DEBUG_ARGS])
         print(
             "No CLI args provided; using default debug checkpoint run "
-            f"(checkpoint={DEFAULT_DEBUG_CHECKPOINT}, video_dir={args.video_dir})."
+            f"(checkpoint={checkpoint_to_use}, video_dir={args.video_dir})."
         )
     else:
         args = parser.parse_args()

@@ -13,6 +13,7 @@ from social_dilemmas.envs.agent import (
     HarvestAgent,
 )
 from social_dilemmas.envs.cleanup import CleanupEnv
+from social_dilemmas.envs.gathering import GatheringEnv
 from social_dilemmas.envs.gym.discrete_with_dtype import DiscreteWithDType
 from social_dilemmas.envs.harvest import HarvestEnv
 from social_dilemmas.envs.map_env import MapEnv
@@ -124,6 +125,22 @@ CLEANUP_PROB_MAP = [
     "@RH B@",
     "@H PB@",
     "@@@@@@",
+]
+
+GATHERING_TEST_MAP = [
+    "@@@@@@@",
+    "@A A  @",
+    "@ P P @",
+    "@A A  @",
+    "@@@@@@@",
+]
+
+GATHERING_BEAM_TEST_MAP = [
+    "@@@@@@@@@@@",
+    "@P       P@",
+    "@         @",
+    "@         @",
+    "@@@@@@@@@@@",
 ]
 
 
@@ -1489,6 +1506,111 @@ class TestCleanupEnv(unittest.TestCase):
 
         # replace the agents with agents with smaller views
         self.add_agent(agent_id, start_pos, start_orientation, self.env, 2)
+
+
+class TestGatheringEnv(unittest.TestCase):
+    def setUp(self):
+        self.env = GatheringEnv(
+            ascii_map=GATHERING_TEST_MAP,
+            num_agents=2,
+            apple_respawn_delay=2,
+            tagged_respawn_delay=3,
+        )
+        self.env.reset()
+
+    def tearDown(self):
+        self.env = None
+
+    def test_apple_respawn_delay(self):
+        # Consume apple at (1, 1) and check it respawns after the configured delay.
+        self.env.agents["agent-0"].update_agent_pos([1, 1])
+        self.env.agents["agent-0"].update_agent_rot("UP")
+        self.env.step({"agent-0": HARVEST_ACTION_MAP["STAY"], "agent-1": HARVEST_ACTION_MAP["STAY"]})
+        self.assertEqual(self.env.world_map[1, 1], b" ")
+
+        # Move away so the apple can respawn onto a free cell.
+        self.env.step(
+            {
+                "agent-0": HARVEST_ACTION_MAP["MOVE_RIGHT"],
+                "agent-1": HARVEST_ACTION_MAP["STAY"],
+            }
+        )
+        self.assertEqual(self.env.world_map[1, 1], b" ")
+        self.env.step({"agent-0": HARVEST_ACTION_MAP["STAY"], "agent-1": HARVEST_ACTION_MAP["STAY"]})
+        self.assertEqual(self.env.world_map[1, 1], b"A")
+
+    def test_observation_shape(self):
+        obs = self.env.reset()
+        self.assertEqual(obs["agent-0"]["curr_obs"].shape, (16, 21, 3))
+
+    def test_default_map_shape(self):
+        env = GatheringEnv(num_agents=2)
+        env.reset()
+        self.assertEqual(env.base_map.shape, (11, 33))
+
+    def test_default_initial_active_apple_count(self):
+        env = GatheringEnv(num_agents=2)
+        env.reset()
+        self.assertEqual(int(np.sum(env.world_map == b"A")), 6)
+
+    def test_spawn_rotation_is_right(self):
+        self.env.reset()
+        self.assertEqual(self.env.agents["agent-0"].get_orientation(), "RIGHT")
+        self.assertEqual(self.env.agents["agent-1"].get_orientation(), "RIGHT")
+
+    def test_fire_beam_width_is_single_line(self):
+        env = GatheringEnv(ascii_map=GATHERING_BEAM_TEST_MAP, num_agents=2)
+        env.reset()
+        fire = HARVEST_ACTION_MAP["FIRE"]
+        stay = HARVEST_ACTION_MAP["STAY"]
+
+        # Place agent-0 in open corridor, facing right.
+        env.agents["agent-0"].update_agent_pos([1, 1])
+        env.agents["agent-0"].update_agent_rot("RIGHT")
+        # Keep agent-1 far away and out of beam path.
+        env.agents["agent-1"].update_agent_pos([1, 9])
+        env.agents["agent-1"].update_agent_rot("RIGHT")
+
+        env.step({"agent-0": fire, "agent-1": stay})
+
+        # Single-line beam means all beam cells must lie on one row.
+        beam_rows = {r for (r, c, ch) in env.beam_pos if ch == b"F"}
+        self.assertEqual(len(beam_rows), 1)
+
+    def test_tagged_agent_gets_zero_observation(self):
+        fire = HARVEST_ACTION_MAP["FIRE"]
+        stay = HARVEST_ACTION_MAP["STAY"]
+
+        # Place agents in front of each other and fire twice.
+        self.env.agents["agent-0"].update_agent_pos([2, 2])
+        self.env.agents["agent-0"].update_agent_rot("RIGHT")
+        self.env.agents["agent-1"].update_agent_pos([2, 3])
+        self.env.agents["agent-1"].update_agent_rot("LEFT")
+
+        self.env.step({"agent-0": fire, "agent-1": stay})
+        obs, _, _, _ = self.env.step({"agent-0": fire, "agent-1": stay})
+        self.assertTrue(self.env.agents["agent-1"].is_tagged_out)
+        self.assertTrue(np.all(obs["agent-1"]["curr_obs"] == 0))
+
+    def test_tagged_respawn_timer(self):
+        # Place agents in front of each other and fire twice to tag agent-1 out.
+        self.env.agents["agent-0"].update_agent_pos([2, 2])
+        self.env.agents["agent-0"].update_agent_rot("RIGHT")
+        self.env.agents["agent-1"].update_agent_pos([2, 3])
+        self.env.agents["agent-1"].update_agent_rot("LEFT")
+
+        fire = HARVEST_ACTION_MAP["FIRE"]
+        stay = HARVEST_ACTION_MAP["STAY"]
+
+        self.env.step({"agent-0": fire, "agent-1": stay})
+        self.assertFalse(self.env.agents["agent-1"].is_tagged_out)
+        self.env.step({"agent-0": fire, "agent-1": stay})
+        self.assertTrue(self.env.agents["agent-1"].is_tagged_out)
+
+        # After tagged_respawn_delay steps, the agent should be active again.
+        for _ in range(3):
+            self.env.step({"agent-0": stay, "agent-1": stay})
+        self.assertFalse(self.env.agents["agent-1"].is_tagged_out)
 
 
 if __name__ == "__main__":

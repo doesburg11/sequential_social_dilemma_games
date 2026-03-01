@@ -23,6 +23,27 @@ HARVEST_MAP = [
     "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
 ]
 
+_GATHERING_INTERIOR_WIDTH = 31
+
+
+def _gathering_row(interior):
+    return "@" + interior.ljust(_GATHERING_INTERIOR_WIDTH) + "@"
+
+
+GATHERING_MAP = [
+    "@" * (_GATHERING_INTERIOR_WIDTH + 2),
+    _gathering_row(" P       AAA          AAA    P "),
+    _gathering_row("      AAAAA        AAAAA"),
+    _gathering_row("     AAAAAAA      AAAAAAA"),
+    _gathering_row("      AAAAA        AAAAA"),
+    _gathering_row("       AAA          AAA"),
+    _gathering_row(""),
+    _gathering_row(""),
+    _gathering_row(""),
+    _gathering_row(""),
+    "@" * (_GATHERING_INTERIOR_WIDTH + 2),
+]
+
 CLEANUP_MAP = [
     "@@@@@@@@@@@@@@@@@@",
     "@RRRRRR     BBBBB@",

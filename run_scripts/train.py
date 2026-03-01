@@ -11,6 +11,7 @@ import pytz
 import ray
 from gymnasium.spaces import Box
 from ray import tune
+from ray.rllib.algorithms.dqn import DQN, DQNConfig
 from ray.rllib.algorithms.impala import IMPALA, IMPALAConfig
 from ray.rllib.algorithms.ppo import PPO, PPOConfig
 from ray.rllib.callbacks.callbacks import RLlibCallback
@@ -28,6 +29,7 @@ REPO_RAY_RESULTS_DIR = str(REPO_ROOT / "ray_results")
 
 from config.default_args import add_default_args
 from social_dilemmas.envs.env_creator import get_env_creator
+from config.dqn_config import apply_dqn_training_config, resolve_config_dqn
 from config.ppo_config import apply_ppo_training_config, resolve_config_ppo
 from utility_funcs import update_nested_dict
 
@@ -41,7 +43,11 @@ def get_algorithm_trainable(algorithm_name):
         return PPO
     if algo == "IMPALA":
         return IMPALA
-    raise ValueError(f"Unsupported algorithm '{algorithm_name}'. Supported values: PPO, IMPALA.")
+    if algo == "DQN":
+        return DQN
+    raise ValueError(
+        f"Unsupported algorithm '{algorithm_name}'. Supported values: PPO, IMPALA, DQN."
+    )
 
 
 def get_algorithm_config_builder(algorithm_name):
@@ -50,7 +56,11 @@ def get_algorithm_config_builder(algorithm_name):
         return PPOConfig()
     if algo == "IMPALA":
         return IMPALAConfig()
-    raise ValueError(f"Unsupported algorithm '{algorithm_name}'. Supported values: PPO, IMPALA.")
+    if algo == "DQN":
+        return DQNConfig()
+    raise ValueError(
+        f"Unsupported algorithm '{algorithm_name}'. Supported values: PPO, IMPALA, DQN."
+    )
 
 
 class _RLlibEnvAdapter(MultiAgentEnv):
@@ -213,6 +223,7 @@ def build_experiment_config_dict(args):
         )
 
     episode_horizon = 1000
+
     base_env_creator = get_env_creator(
         env=args.env,
         num_agents=args.num_agents,
@@ -297,14 +308,6 @@ def build_experiment_config_dict(args):
             policies=policy_specs,
             policy_mapping_fn=policy_mapping_fn,
         )
-        .training(
-            gamma=0.99,
-            lr=args.lr,
-            lr_schedule=lr_schedule,
-            train_batch_size=train_batch_size,
-            entropy_coeff=args.entropy_coeff,
-            grad_clip=args.grad_clip,
-        )
         .rl_module(
             model_config={
                 "use_lstm": False,
@@ -323,19 +326,47 @@ def build_experiment_config_dict(args):
     algorithm_config = algorithm_config.callbacks(callbacks_class=callback_classes)
 
     if args.algorithm.upper() == "PPO":
+        algorithm_config = algorithm_config.training(
+            gamma=0.99,
+            lr=args.lr,
+            lr_schedule=lr_schedule,
+            train_batch_size=train_batch_size,
+            entropy_coeff=args.entropy_coeff,
+            grad_clip=args.grad_clip,
+        )
         algorithm_config = apply_ppo_training_config(
             algorithm_config=algorithm_config,
             args=args,
             train_batch_size=train_batch_size,
         )
     elif args.algorithm.upper() == "IMPALA":
-        algorithm_config = algorithm_config.training(vf_loss_coeff=0.1)
+        algorithm_config = algorithm_config.training(
+            gamma=0.99,
+            lr=args.lr,
+            lr_schedule=lr_schedule,
+            train_batch_size=train_batch_size,
+            entropy_coeff=args.entropy_coeff,
+            grad_clip=args.grad_clip,
+            vf_loss_coeff=0.1,
+        )
+    elif args.algorithm.upper() == "DQN":
+        algorithm_config = apply_dqn_training_config(
+            algorithm_config=algorithm_config,
+            args=args,
+            train_batch_size=train_batch_size,
+        )
     else:
-        raise ValueError("Unsupported algorithm. Supported algorithms for this stack: PPO, IMPALA.")
+        raise ValueError(
+            "Unsupported algorithm. Supported algorithms for this stack: PPO, IMPALA, DQN."
+        )
 
     config_dict = algorithm_config.to_dict()
     if args.tune_hparams:
-        tune_dict = create_hparam_tune_dict(model=args.model, is_config=True)
+        tune_dict = create_hparam_tune_dict(
+            model=args.model,
+            algorithm=args.algorithm,
+            is_config=True,
+        )
         update_nested_dict(config_dict, tune_dict)
 
     return config_dict
@@ -505,7 +536,10 @@ def build_experiment_dict(args, experiment_name, trainer, config):
         # RLlib New Stack reports this counter instead of legacy `timesteps_total`.
         experiment_dict["stop"]["num_env_steps_sampled_lifetime"] = args.stop_at_timesteps_total
     training_iteration_stop = args.stop_at_training_iteration
-    if args.algorithm.upper() == "PPO":
+    default_cli_stop_iter = parser.get_default("stop_at_training_iteration")
+    explicit_stop_iter_override = training_iteration_stop != default_cli_stop_iter
+
+    if args.algorithm.upper() == "PPO" and not explicit_stop_iter_override:
         ppo_train_batch_size = (
             args.train_batch_size
             if args.train_batch_size is not None
@@ -514,6 +548,16 @@ def build_experiment_dict(args, experiment_name, trainer, config):
         training_iteration_stop = resolve_config_ppo(
             args=args,
             train_batch_size=ppo_train_batch_size,
+        )["max_iters"]
+    elif args.algorithm.upper() == "DQN" and not explicit_stop_iter_override:
+        dqn_train_batch_size = (
+            args.train_batch_size
+            if args.train_batch_size is not None
+            else max(1, args.num_workers) * args.num_envs_per_worker * args.rollout_fragment_length
+        )
+        training_iteration_stop = resolve_config_dqn(
+            args=args,
+            train_batch_size=dqn_train_batch_size,
         )["max_iters"]
     if training_iteration_stop is not None:
         experiment_dict["stop"]["training_iteration"] = training_iteration_stop
@@ -540,7 +584,7 @@ def create_experiment(args):
     return experiment_dict
 
 
-def create_hparam_tune_dict(model, is_config=False):
+def create_hparam_tune_dict(model, algorithm, is_config=False):
     """
     Create a hyperparameter tuning dict for population-based training.
     :param is_config: Whether these hyperparameters are being used in the config dict or not.
@@ -563,18 +607,22 @@ def create_hparam_tune_dict(model, is_config=False):
             "Only 'baseline' is supported."
         )
 
-    return {
-        "entropy_coeff": wrapper(np.random.exponential(1 / 1000)),
-        "lr": wrapper(np.random.uniform(0.00001, 0.01)),
-    }
+    tune_dict = {"lr": wrapper(np.random.uniform(0.00001, 0.01))}
+    if str(algorithm).upper() in ("PPO", "IMPALA"):
+        tune_dict["entropy_coeff"] = wrapper(np.random.exponential(1 / 1000))
+    return tune_dict
 
 
-def create_pbt_scheduler(model):
+def create_pbt_scheduler(model, algorithm):
     """
     Create a population-based training (PBT) scheduler.
     :return: A new PBT scheduler.
     """
-    hyperparam_mutations = create_hparam_tune_dict(model=model, is_config=False)
+    hyperparam_mutations = create_hparam_tune_dict(
+        model=model,
+        algorithm=algorithm,
+        is_config=False,
+    )
 
     pbt = PopulationBasedTraining(
         time_attr="training_iteration",
@@ -602,7 +650,7 @@ def run(args, experiments):
     )
     resolved_gpu_cfg = {k: experiments["config"].get(k, None) for k in gpu_cfg_keys}
     print(f"Resolved RLlib GPU config: {resolved_gpu_cfg}")
-    scheduler = create_pbt_scheduler(args.model) if args.tune_hparams else None
+    scheduler = create_pbt_scheduler(args.model, args.algorithm) if args.tune_hparams else None
     run_kwargs = {
         "name": experiments["name"],
         "stop": experiments["stop"],

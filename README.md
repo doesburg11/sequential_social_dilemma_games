@@ -7,7 +7,7 @@ This repository is a Ray RLlib[[1]](#references) new API stack[[2]](#references)
 It provides an open-source implementation of DeepMind's Sequential Social Dilemma (SSD) multi-agent environments [[4]](#reference) [[5]](#reference) [[6]](#reference). SSDs are spatially and temporally extended Prisoner's Dilemma-like games where individually optimal short-term behavior can harm long-term group outcomes.
 
 ## What this repository does
-- Implements the **Cleanup** and **Harvest** SSD environments.
+- Implements the **Cleanup**, **Harvest**, and **Gathering** SSD environments.
 - Exposes environment interfaces for **Gymnasium**, **PettingZoo**, and **RLlib MultiAgentEnv** workflows.
 - Includes RLlib training entry points via `run_scripts/train.py`.
 - Provides tests and visualization utilities for inspecting multi-agent behavior.
@@ -21,6 +21,8 @@ It provides an open-source implementation of DeepMind's Sequential Social Dilemm
 * **Harvest**: A tragedy-of-the-commons dilemma in which apples regrow at a rate that depends on the amount of nearby apples. If individual agents employ an exploitative strategy by greedily consuming too many apples, the collective reward of all agents is reduced.
 
 <img src="images/harvest.png" alt="Image of the Harvest game" width="483" height="187"/>
+
+* **Gathering**: A two-player competitive social dilemma where agents collect apples for reward and can use beams to temporarily tag opponents out of the game.
 
 <img src="images/schelling.png" alt="Schelling diagrams for Harvest and Cleanup" width="953" height="352"/>
 

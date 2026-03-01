@@ -9,14 +9,15 @@ def add_default_args(parser):
     parser.add_argument(
         "--env",
         type=str,
-        default="harvest",
-        help="Name of the environment to use. Can be switch, cleanup or harvest.",
+        default="gathering",
+        help="Name of the environment to use. Can be switch, cleanup, gathering, or harvest."
+        " Gathering defaults to 2 players (paper setup) but supports more in this repo.",
     )
     parser.add_argument(
         "--algorithm",
         type=str,
-        default="PPO",
-        help="Name of the rllib algorithm to use. Supported: PPO or IMPALA.",
+        default="DQN",
+        help="Name of the rllib algorithm to use. Supported: PPO, IMPALA, or DQN.",
     )
     parser.add_argument(
         "--model",
@@ -38,8 +39,8 @@ def add_default_args(parser):
     parser.add_argument(
         "--num_agents", 
         type=int, 
-        default=5, 
-        help="Number of agent policies"
+        default=5,
+        help="Number of agent policies (1-9 for Gathering in this implementation).",
     )
     parser.add_argument(
         "--rollout_fragment_length",
