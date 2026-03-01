@@ -61,7 +61,7 @@ Example Usage via executable:
     --env CartPole-v0 --steps 1000000 --out rollouts.pkl
 """
 
-DEFAULT_DEBUG_CHECKPOINT = "/home/doesburg/Projects/SequentialSocialDilemmaGames/ray_results/gathering_baseline_DQN/DQN_gathering_env_254ce_00000_0_2026-03-01_15-58-45/checkpoint_000002"
+DEFAULT_DEBUG_CHECKPOINT = "/home/doesburg/Projects/SequentialSocialDilemmaGames/ray_results/gathering_baseline_DQN/DQN_gathering_env_254ce_00000_0_2026-03-01_15-58-45/checkpoint_000005"
 DEFAULT_CHECKPOINT_SEARCH_DIRS = [
     str(Path(__file__).resolve().parents[1] / "ray_results"),
     str(Path.home() / "ray_results"),
