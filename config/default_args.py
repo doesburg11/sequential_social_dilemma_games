@@ -59,7 +59,7 @@ def add_default_args(parser):
     parser.add_argument(
         "--checkpoint_frequency",
         type=int,
-        default=100,
+        default=10,
         help="Number of steps before a checkpoint is saved.",
     )
     parser.add_argument(
@@ -86,7 +86,11 @@ def add_default_args(parser):
         default=1,
         help="Amount of times to repeat all experiments",
     )
-    parser.add_argument("--memory", type=int, default=None, help="Amount of total usable memory")
+    parser.add_argument(
+        "--memory", type=int, 
+        default=None, 
+        help="Amount of total usable memory"
+    )
     parser.add_argument(
         "--object_store_memory",
         type=int,
@@ -94,23 +98,36 @@ def add_default_args(parser):
         help="Amount of memory for the object store",
     )
     parser.add_argument(
-        "--redis_max_memory", type=int, default=None, help="Amount of memory for redis"
-    )
-
-    parser.add_argument("--num_workers", type=int, default=4, help="Total number of workers")
-    parser.add_argument(
-        "--cpus_for_driver", type=int, default=0, help="Number of CPUs used by the driver"
+        "--redis_max_memory", 
+        type=int, 
+        default=None, 
+        help="Amount of memory for redis"
     )
     parser.add_argument(
-        "--gpus_for_driver", type=float, default=1, help="Number of GPUs used by the driver"
+        "--num_workers", 
+        type=int, default=4, 
+        help="Total number of workers"
     )
     parser.add_argument(
-        "--cpus_per_worker", type=int, default=1, help="Number of CPUs used by one worker"
+        "--cpus_for_driver", 
+        type=int, default=0, 
+        help="Number of CPUs used by the driver"
     )
     parser.add_argument(
-        "--gpus_per_worker", type=float, default=0, help="Number of GPUs used by one worker"
+        "--gpus_for_driver", 
+        type=float, default=1, 
+        help="Number of GPUs used by the driver"
     )
-
+    parser.add_argument(
+        "--cpus_per_worker", 
+        type=int, default=1, 
+        help="Number of CPUs used by one worker"
+    )
+    parser.add_argument(
+        "--gpus_per_worker", 
+        type=float, default=0, 
+        help="Number of GPUs used by one worker"
+    )
     parser.add_argument(
         "--num_envs_per_worker",
         type=int,
@@ -154,7 +171,6 @@ def add_default_args(parser):
         default=40,
         help="Gradients are clipped by this amount per update.",
     )
-
     parser.add_argument(
         "--lr",
         type=float,
@@ -177,16 +193,18 @@ def add_default_args(parser):
         help="Values for the learning rate schedule. Linearly interpolates using "
         "--lr_schedule_steps",
     )
-
-    parser.add_argument("--entropy_coeff", type=float, default=0.001, help="Entropy reward weight.")
-
+    parser.add_argument(
+        "--entropy_coeff",
+        type=float,
+        default=0.001,
+        help="Entropy reward weight."
+    )
     parser.add_argument(
         "--use_collective_reward",
         action="store_true",
         default=False,
         help="Train using collective reward instead of individual reward.",
     )
-
     # MOA Parameters
     parser.add_argument(
         "--moa_loss_weight",
@@ -194,7 +212,6 @@ def add_default_args(parser):
         default=1.0,
         help="Loss weight of the moa network",
     )
-
     parser.add_argument(
         "--influence_reward_weight",
         type=float,
@@ -226,7 +243,6 @@ def add_default_args(parser):
         default=1.0,
         help="Loss weight of the scm network",
     )
-
     parser.add_argument(
         "--curiosity_reward_weight",
         type=float,
@@ -250,7 +266,6 @@ def add_default_args(parser):
         "--curiosity_reward_schedule_steps. The final value is"
         " --curiosity_reward_weight * interpolated_value",
     )
-
     parser.add_argument(
         "--scm_forward_vs_inverse_loss_weight",
         type=float,
@@ -259,7 +274,6 @@ def add_default_args(parser):
         "weight * forward_loss + (1 - weight) * inverse_loss"
         "Must be in the range [0, 1].",
     )
-
     # PPO parameters
     parser.add_argument(
         "--ppo_sgd_minibatch_size",
@@ -268,7 +282,6 @@ def add_default_args(parser):
         help="Minibatch size for the stochastic gradient descent step in the PPO algorithm. If not"
         "specified, uses config/ppo_config.py.",
     )
-
     # Env-specific parameters
     parser.add_argument(
         "--num_switches",

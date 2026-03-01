@@ -77,6 +77,36 @@ Many more options are available which can be found in [default_args.py](config/d
 
 Note that the RLlib initialization time can be rather high (up to 5 minutes) the more agents you use, and the more complex your used model is.
 
+## Leibo-style evaluation (via `visualizer_rllib.py`)
+
+You can run rollout evaluation and produce a Leibo-comparison metrics report
+directly from `visualization/visualizer_rllib.py`.
+
+- Run evaluation and print summary metrics:
+```bash
+PYTHONPATH=. ./.conda/bin/python visualization/visualizer_rllib.py \
+  <checkpoint_path> --run DQN --env gathering_env --episodes 100 --no-render \
+  --leibo-eval
+```
+
+- Save full metrics report to JSON:
+```bash
+PYTHONPATH=. ./.conda/bin/python visualization/visualizer_rllib.py \
+  <checkpoint_path> --run DQN --env gathering_env --episodes 100 --no-render \
+  --leibo-eval --leibo-out output/leibo_eval.json
+```
+
+For 2-agent runs, the JSON includes estimated `R,S,T,P` payoffs and checks the
+Leibo inequality conditions. For more than 2 agents, it reports aggregate SSD
+behavior metrics (returns, fire rates, tagging pressure, and class-profile counts).
+
+- Show a live 2-agent per-step joint outcome matrix (rolling window):
+```bash
+PYTHONPATH=. ./.conda/bin/python visualization/visualizer_rllib.py \
+  <checkpoint_path> --run DQN --env gathering_env --episodes 10 --no-render \
+  --show-outcome-matrix --outcome-matrix-interval 200 --outcome-matrix-window 200
+```
+
 # CUDA, cuDNN and tensorflow-gpu
 
 If you run into any cuda errors, make sure you've got a [compatible set](https://www.tensorflow.org/install/source#tested_build_configurations) of cuda/cudnn/tensorflow versions installed. However, beware of the following:

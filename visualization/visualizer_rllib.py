@@ -61,7 +61,7 @@ Example Usage via executable:
     --env CartPole-v0 --steps 1000000 --out rollouts.pkl
 """
 
-DEFAULT_DEBUG_CHECKPOINT = "/home/doesburg/Projects/sequential_social_dilemma_games/ray_results/harvest_baseline_DQN/DQN_harvest_env_cfcf8_00000_0_2026-03-01_02-13-10/checkpoint_000000"
+DEFAULT_DEBUG_CHECKPOINT = "/home/doesburg/Projects/sequential_social_dilemma_games/ray_results/gathering_baseline_DQN/DQN_gathering_env_254ce_00000_0_2026-03-01_15-58-45/checkpoint_000002"
 DEFAULT_CHECKPOINT_SEARCH_DIRS = [
     str(Path(__file__).resolve().parents[1] / "ray_results"),
     str(Path.home() / "ray_results"),
@@ -70,16 +70,15 @@ DEFAULT_CHECKPOINT_DISPLAY_PREFIX = (
     str(Path(__file__).resolve().parents[1] / "ray_results") + os.sep
 )
 DEFAULT_DEBUG_ARGS = [
-    "--run",
-    "PPO",
-    "--env",
-    "harvest_env",
-    "--episodes",
-    "1",
-    "--render-delay-ms",
-    "10",
-    "--random-action-prob",
-    "0.02",
+    "--run","PPO",
+    "--env","harvest_env",
+    "--episodes","1",
+    "--render-delay-ms","10",
+    "--random-action-prob","0.02",
+    "--leibo-eval",
+    "--leibo-out", str(Path(__file__).resolve().parents[1] / "output" / "leibo_eval.json"),
+    # "--video-dir", str(Path(__file__).resolve().parents[1] / "output"),
+    "--video-filename", "rollout.mp4",
 ]
 
 
@@ -552,10 +551,71 @@ def create_parser(parser_creator=None):
         default=100,
         help="Print rollout progress every N environment steps (0 disables).",
     )
+    parser.add_argument(
+        "--leibo-eval",
+        default=False,
+        action="store_true",
+        help="Collect Leibo-style SSD comparison metrics during rollout.",
+    )
+    parser.add_argument(
+        "--leibo-out",
+        type=str,
+        default=None,
+        help="Optional JSON file path for Leibo-eval metrics output.",
+    )
+    parser.add_argument(
+        "--leibo-fire-threshold",
+        type=float,
+        default=0.02,
+        help="FIRE-rate threshold for classifying an agent as cooperative (C) vs defective (D).",
+    )
+    parser.add_argument(
+        "--show-outcome-matrix",
+        default=False,
+        action="store_true",
+        help="For 2-agent runs, print a live C/D joint-outcome matrix during rollout.",
+    )
+    parser.add_argument(
+        "--outcome-matrix-interval",
+        type=int,
+        default=200,
+        help="Print interval (steps) for the live 2-agent outcome matrix.",
+    )
+    parser.add_argument(
+        "--outcome-matrix-window",
+        type=int,
+        default=200,
+        help="Rolling window size (steps) used for the live 2-agent outcome matrix.",
+    )
     return parser
 
 
 def run(args, parser):
+    def _handle_leibo_report(report):
+        if not report:
+            return
+        summary = report.get("summary", {})
+        print("leibo_eval/episodes:", summary.get("episodes"))
+        print("leibo_eval/mean_social_welfare:", summary.get("mean_social_welfare"))
+        print("leibo_eval/mean_episode_len:", summary.get("mean_episode_len"))
+        print("leibo_eval/class_profile_counts:", summary.get("class_profile_counts"))
+        payoff = report.get("two_agent_payoff_estimates", {})
+        if payoff.get("enabled"):
+            payoffs = payoff.get("payoffs", {})
+            print("leibo_eval/payoffs:", payoffs)
+            print("leibo_eval/inequality_checks:", payoff.get("inequality_checks"))
+            matrix = report.get("two_agent_step_matrix_aggregate")
+            if matrix:
+                print("leibo_eval/two_agent_step_matrix_aggregate:", matrix)
+        elif payoff:
+            print("leibo_eval/payoff_estimation:", payoff.get("reason"))
+        if args.leibo_out:
+            out_path = Path(args.leibo_out).expanduser()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with out_path.open("w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2, sort_keys=True)
+            print(f"Leibo eval report saved to: {out_path}")
+
     def _register_optional_custom_models():
         # Some historical models require optional TF modules. Only register
         # models that can be imported in the current environment.
@@ -725,7 +785,7 @@ def run(args, parser):
             target_episodes=num_episodes,
             save_info=args.save_info,
         ) as saver:
-            rollout(
+            leibo_report = rollout(
                 direct_agent,
                 args.env,
                 num_steps,
@@ -738,7 +798,13 @@ def run(args, parser):
                 render_delay_s=max(0.0, float(args.render_delay_ms) / 1000.0),
                 deterministic_actions=bool(args.deterministic_actions),
                 step_log_interval=max(0, int(args.step_log_interval)),
+                leibo_eval=bool(args.leibo_eval or args.leibo_out or args.show_outcome_matrix),
+                leibo_fire_threshold=float(args.leibo_fire_threshold),
+                show_outcome_matrix=bool(args.show_outcome_matrix),
+                outcome_matrix_interval=max(1, int(args.outcome_matrix_interval)),
+                outcome_matrix_window=max(1, int(args.outcome_matrix_window)),
             )
+            _handle_leibo_report(leibo_report)
             if not args.no_render and not video_dir:
                 try:
                     import matplotlib.pyplot as plt
@@ -762,7 +828,13 @@ def run(args, parser):
         agent.restore(args.checkpoint)
 
         # New API stack-friendly checkpoint evaluation path.
-        if is_new_api_stack and args.no_render and not video_dir and args.out is None:
+        if (
+            is_new_api_stack
+            and args.no_render
+            and not video_dir
+            and args.out is None
+            and not (args.leibo_eval or args.leibo_out or args.show_outcome_matrix)
+        ):
             _evaluate_and_print(agent)
             return
 
@@ -775,7 +847,7 @@ def run(args, parser):
             target_episodes=num_episodes,
             save_info=args.save_info,
         ) as saver:
-            rollout(
+            leibo_report = rollout(
                 agent,
                 args.env,
                 num_steps,
@@ -788,7 +860,13 @@ def run(args, parser):
                 render_delay_s=max(0.0, float(args.render_delay_ms) / 1000.0),
                 deterministic_actions=bool(args.deterministic_actions),
                 step_log_interval=max(0, int(args.step_log_interval)),
+                leibo_eval=bool(args.leibo_eval or args.leibo_out or args.show_outcome_matrix),
+                leibo_fire_threshold=float(args.leibo_fire_threshold),
+                show_outcome_matrix=bool(args.show_outcome_matrix),
+                outcome_matrix_interval=max(1, int(args.outcome_matrix_interval)),
+                outcome_matrix_window=max(1, int(args.outcome_matrix_window)),
             )
+            _handle_leibo_report(leibo_report)
             if not args.no_render and not video_dir:
                 try:
                     import matplotlib.pyplot as plt
@@ -831,6 +909,341 @@ def keep_going(steps, num_steps, episodes, num_episodes):
     return True
 
 
+def _safe_mean(values):
+    if not values:
+        return None
+    return float(np.mean(values))
+
+
+class LeiboMetricsCollector:
+    """Collect Leibo-style SSD comparison metrics from rollout episodes.
+
+    Notes:
+    - For 2-agent runs, this estimates R/S/T/P by classifying each agent as
+      cooperative or defective using FIRE-action rate.
+    - For >2 agents, only aggregated behavior metrics are reported.
+    """
+
+    _JOINT_CELLS = ("CC", "CD", "DC", "DD")
+
+    def __init__(
+        self,
+        fire_rate_threshold=0.02,
+        show_outcome_matrix=False,
+        outcome_matrix_interval=200,
+        outcome_matrix_window=200,
+    ):
+        self.fire_rate_threshold = float(fire_rate_threshold)
+        self.show_outcome_matrix = bool(show_outcome_matrix)
+        self.outcome_matrix_interval = max(1, int(outcome_matrix_interval))
+        self.outcome_matrix_window = max(1, int(outcome_matrix_window))
+        self.episodes = []
+        self._agent_ids = []
+        self._episode_index = 0
+        self._step_count = 0
+        self._returns = {}
+        self._fire_counts = {}
+        self._action_counts = {}
+        self._tagged_steps = {}
+        self._tag_events = {}
+        self._prev_tagged = {}
+        self._ordered_pair = ()
+        self._pending_joint_cell = None
+        self._window_joint_rows = collections.deque(maxlen=self.outcome_matrix_window)
+        self._joint_stats_cumulative = self._new_joint_stats()
+
+    @classmethod
+    def _new_joint_stats(cls):
+        return {
+            cell: {"n": 0, "r0_sum": 0.0, "r1_sum": 0.0} for cell in cls._JOINT_CELLS
+        }
+
+    @staticmethod
+    def _joint_mean_or_none(sum_value, count):
+        if count <= 0:
+            return None
+        return float(sum_value) / float(count)
+
+    @classmethod
+    def _joint_stats_to_report(cls, stats):
+        out = {}
+        for cell in cls._JOINT_CELLS:
+            count = int(stats[cell]["n"])
+            out[cell] = {
+                "n": count,
+                "mean_r0": cls._joint_mean_or_none(stats[cell]["r0_sum"], count),
+                "mean_r1": cls._joint_mean_or_none(stats[cell]["r1_sum"], count),
+            }
+        return out
+
+    def _format_joint_cell(self, stats, cell):
+        count = int(stats[cell]["n"])
+        if count <= 0:
+            return "n=0"
+        mean_r0 = self._joint_mean_or_none(stats[cell]["r0_sum"], count)
+        mean_r1 = self._joint_mean_or_none(stats[cell]["r1_sum"], count)
+        return f"n={count:<4} r0={mean_r0:+.3f} r1={mean_r1:+.3f}"
+
+    def _format_outcome_matrix(self, stats, window_len):
+        a0, a1 = self._ordered_pair
+        header = (
+            f"[episode {self._episode_index}] step={self._step_count} "
+            f"2-agent outcome matrix (window={window_len})"
+        )
+        labels = f"({a0}=rows, {a1}=cols; C=non-FIRE, D=FIRE)"
+        row_header = f"{'':10} {'P1:C':<30} {'P1:D':<30}"
+        row_c = (
+            f"{'P0:C':<10} {self._format_joint_cell(stats, 'CC'):<30} "
+            f"{self._format_joint_cell(stats, 'CD'):<30}"
+        )
+        row_d = (
+            f"{'P0:D':<10} {self._format_joint_cell(stats, 'DC'):<30} "
+            f"{self._format_joint_cell(stats, 'DD'):<30}"
+        )
+        return "\n".join([header, labels, row_header, row_c, row_d])
+
+    @staticmethod
+    def _is_fire_action(render_env, agent_id, action):
+        try:
+            agent = render_env.agents[agent_id]
+            return agent.action_map(int(action)) == "FIRE"
+        except Exception:
+            return False
+
+    @staticmethod
+    def _get_tagged_state(render_env, agent_ids):
+        tagged = {}
+        agents = getattr(render_env, "agents", {})
+        for agent_id in agent_ids:
+            agent = agents.get(agent_id)
+            tagged[agent_id] = bool(getattr(agent, "is_tagged_out", False)) if agent is not None else False
+        return tagged
+
+    def begin_episode(self, agent_ids, episode_index=0):
+        self._agent_ids = sorted(agent_ids)
+        self._episode_index = int(episode_index)
+        self._step_count = 0
+        self._returns = {agent_id: 0.0 for agent_id in self._agent_ids}
+        self._fire_counts = {agent_id: 0 for agent_id in self._agent_ids}
+        self._action_counts = {agent_id: 0 for agent_id in self._agent_ids}
+        self._tagged_steps = {agent_id: 0 for agent_id in self._agent_ids}
+        self._tag_events = {agent_id: 0 for agent_id in self._agent_ids}
+        self._prev_tagged = {agent_id: False for agent_id in self._agent_ids}
+        self._ordered_pair = tuple(self._agent_ids[:2]) if len(self._agent_ids) == 2 else ()
+        self._pending_joint_cell = None
+        self._window_joint_rows.clear()
+        self._joint_stats_cumulative = self._new_joint_stats()
+
+    def on_actions(self, action_dict, render_env):
+        for agent_id, action in action_dict.items():
+            if agent_id not in self._action_counts:
+                continue
+            self._action_counts[agent_id] += 1
+            if self._is_fire_action(render_env, agent_id, action):
+                self._fire_counts[agent_id] += 1
+
+        if not self._ordered_pair:
+            self._pending_joint_cell = None
+            return
+
+        agent0_id, agent1_id = self._ordered_pair
+        if agent0_id not in action_dict or agent1_id not in action_dict:
+            self._pending_joint_cell = None
+            return
+        a0_cls = "D" if self._is_fire_action(render_env, agent0_id, action_dict[agent0_id]) else "C"
+        a1_cls = "D" if self._is_fire_action(render_env, agent1_id, action_dict[agent1_id]) else "C"
+        self._pending_joint_cell = a0_cls + a1_cls
+
+    def on_step(self, reward_dict, render_env):
+        self._step_count += 1
+        if isinstance(reward_dict, dict):
+            for agent_id, reward in reward_dict.items():
+                if agent_id in self._returns:
+                    self._returns[agent_id] += float(reward)
+        tagged_now = self._get_tagged_state(render_env, self._agent_ids)
+        for agent_id in self._agent_ids:
+            if tagged_now.get(agent_id, False):
+                self._tagged_steps[agent_id] += 1
+            if tagged_now.get(agent_id, False) and not self._prev_tagged.get(agent_id, False):
+                self._tag_events[agent_id] += 1
+        self._prev_tagged = tagged_now
+
+        if (
+            self._ordered_pair
+            and self._pending_joint_cell in self._JOINT_CELLS
+            and isinstance(reward_dict, dict)
+        ):
+            agent0_id, agent1_id = self._ordered_pair
+            r0 = float(reward_dict.get(agent0_id, 0.0))
+            r1 = float(reward_dict.get(agent1_id, 0.0))
+            cell = self._pending_joint_cell
+            self._joint_stats_cumulative[cell]["n"] += 1
+            self._joint_stats_cumulative[cell]["r0_sum"] += r0
+            self._joint_stats_cumulative[cell]["r1_sum"] += r1
+            self._window_joint_rows.append((cell, r0, r1))
+
+            if self.show_outcome_matrix and (self._step_count % self.outcome_matrix_interval == 0):
+                window_stats = self._new_joint_stats()
+                for w_cell, w_r0, w_r1 in self._window_joint_rows:
+                    window_stats[w_cell]["n"] += 1
+                    window_stats[w_cell]["r0_sum"] += float(w_r0)
+                    window_stats[w_cell]["r1_sum"] += float(w_r1)
+                print(self._format_outcome_matrix(window_stats, len(self._window_joint_rows)))
+
+    def end_episode(self, episode_index):
+        fire_rates = {}
+        tagged_fraction = {}
+        agent_class = {}
+        for agent_id in self._agent_ids:
+            action_n = max(1, int(self._action_counts.get(agent_id, 0)))
+            fire_rate = float(self._fire_counts.get(agent_id, 0)) / float(action_n)
+            fire_rates[agent_id] = fire_rate
+            tagged_fraction[agent_id] = (
+                float(self._tagged_steps.get(agent_id, 0)) / float(max(1, self._step_count))
+            )
+            agent_class[agent_id] = (
+                "C" if fire_rate <= self.fire_rate_threshold else "D"
+            )
+
+        unique_classes = set(agent_class.values())
+        if unique_classes == {"C"}:
+            profile = "CC"
+        elif unique_classes == {"D"}:
+            profile = "DD"
+        else:
+            profile = "mixed"
+
+        episode_data = {
+            "episode_index": int(episode_index),
+            "episode_len": int(self._step_count),
+            "agent_returns": {k: float(v) for k, v in self._returns.items()},
+            "social_welfare": float(sum(self._returns.values())),
+            "fire_counts": {k: int(v) for k, v in self._fire_counts.items()},
+            "fire_rates": fire_rates,
+            "tag_events": {k: int(v) for k, v in self._tag_events.items()},
+            "tagged_fraction": tagged_fraction,
+            "agent_classification": agent_class,
+            "class_profile": profile,
+        }
+        if self._ordered_pair:
+            episode_data["two_agent_step_matrix_cumulative"] = self._joint_stats_to_report(
+                self._joint_stats_cumulative
+            )
+        self.episodes.append(episode_data)
+        return episode_data
+
+    def _build_two_agent_payoff_estimates(self):
+        if not self.episodes:
+            return {}
+        first = self.episodes[0]
+        agent_ids = sorted(first["agent_returns"].keys())
+        if len(agent_ids) != 2:
+            return {
+                "enabled": False,
+                "reason": "R/S/T/P estimation is only defined in this report for 2-agent runs.",
+            }
+
+        a0, a1 = agent_ids
+        r_samples = []
+        p_samples = []
+        s_samples = []
+        t_samples = []
+        for episode in self.episodes:
+            classes = episode["agent_classification"]
+            returns = episode["agent_returns"]
+            c0, c1 = classes[a0], classes[a1]
+            r0, r1 = float(returns[a0]), float(returns[a1])
+            if c0 == "C" and c1 == "C":
+                r_samples.extend([r0, r1])
+            elif c0 == "D" and c1 == "D":
+                p_samples.extend([r0, r1])
+            elif c0 == "C" and c1 == "D":
+                s_samples.append(r0)
+                t_samples.append(r1)
+            elif c0 == "D" and c1 == "C":
+                t_samples.append(r0)
+                s_samples.append(r1)
+
+        r_val = _safe_mean(r_samples)
+        p_val = _safe_mean(p_samples)
+        s_val = _safe_mean(s_samples)
+        t_val = _safe_mean(t_samples)
+
+        inequality_checks = None
+        if all(v is not None for v in (r_val, p_val, s_val, t_val)):
+            inequality_checks = {
+                "R_gt_P": bool(r_val > p_val),
+                "R_gt_S": bool(r_val > s_val),
+                "twoR_gt_T_plus_S": bool((2.0 * r_val) > (t_val + s_val)),
+                "greed_T_gt_R": bool(t_val > r_val),
+                "fear_P_gt_S": bool(p_val > s_val),
+                "condition_4_greed_or_fear": bool((t_val > r_val) or (p_val > s_val)),
+            }
+
+        return {
+            "enabled": True,
+            "agent_ids": agent_ids,
+            "samples": {
+                "R_n": len(r_samples),
+                "P_n": len(p_samples),
+                "S_n": len(s_samples),
+                "T_n": len(t_samples),
+            },
+            "payoffs": {"R": r_val, "P": p_val, "S": s_val, "T": t_val},
+            "inequality_checks": inequality_checks,
+        }
+
+    def build_report(self):
+        if not self.episodes:
+            return {}
+        episode_lens = [ep["episode_len"] for ep in self.episodes]
+        social_welfare = [ep["social_welfare"] for ep in self.episodes]
+        reward_std = [float(np.std(list(ep["agent_returns"].values()))) for ep in self.episodes]
+        class_profiles = collections.Counter(ep["class_profile"] for ep in self.episodes)
+
+        mean_fire_rate = {}
+        mean_tagged_fraction = {}
+        all_agent_ids = sorted(self.episodes[0]["agent_returns"].keys())
+        for agent_id in all_agent_ids:
+            mean_fire_rate[agent_id] = _safe_mean(
+                [ep["fire_rates"][agent_id] for ep in self.episodes]
+            )
+            mean_tagged_fraction[agent_id] = _safe_mean(
+                [ep["tagged_fraction"][agent_id] for ep in self.episodes]
+            )
+
+        report = {
+            "summary": {
+                "episodes": len(self.episodes),
+                "mean_episode_len": _safe_mean(episode_lens),
+                "mean_social_welfare": _safe_mean(social_welfare),
+                "mean_return_std_across_agents": _safe_mean(reward_std),
+                "class_profile_counts": dict(class_profiles),
+                "mean_fire_rate": mean_fire_rate,
+                "mean_tagged_fraction": mean_tagged_fraction,
+                "fire_rate_threshold_for_C": self.fire_rate_threshold,
+            },
+            "two_agent_payoff_estimates": self._build_two_agent_payoff_estimates(),
+            "episodes": self.episodes,
+        }
+        if self.episodes and len(self.episodes[0].get("agent_returns", {})) == 2:
+            agg = self._new_joint_stats()
+            for ep in self.episodes:
+                matrix = ep.get("two_agent_step_matrix_cumulative", {})
+                for cell in self._JOINT_CELLS:
+                    cell_row = matrix.get(cell, {})
+                    count = int(cell_row.get("n", 0))
+                    mean_r0 = cell_row.get("mean_r0")
+                    mean_r1 = cell_row.get("mean_r1")
+                    agg[cell]["n"] += count
+                    if mean_r0 is not None:
+                        agg[cell]["r0_sum"] += float(mean_r0) * count
+                    if mean_r1 is not None:
+                        agg[cell]["r1_sum"] += float(mean_r1) * count
+            report["two_agent_step_matrix_aggregate"] = self._joint_stats_to_report(agg)
+        return report
+
+
 def rollout(
     agent,
     env_name,
@@ -844,6 +1257,11 @@ def rollout(
     render_delay_s=0.0,
     deterministic_actions=False,
     step_log_interval=100,
+    leibo_eval=False,
+    leibo_fire_threshold=0.02,
+    show_outcome_matrix=False,
+    outcome_matrix_interval=200,
+    outcome_matrix_window=200,
 ):
     policy_agent_mapping = default_policy_agent_mapping
     use_module_inference = False
@@ -851,6 +1269,12 @@ def rollout(
 
     if saver is None:
         saver = RolloutSaver()
+    leibo_collector = LeiboMetricsCollector(
+        fire_rate_threshold=leibo_fire_threshold,
+        show_outcome_matrix=show_outcome_matrix,
+        outcome_matrix_interval=outcome_matrix_interval,
+        outcome_matrix_window=outcome_matrix_window,
+    ) if leibo_eval else None
 
     if hasattr(agent, "workers") and isinstance(agent.workers, WorkerSet):
         env = agent.workers.local_worker().env
@@ -1008,6 +1432,11 @@ def rollout(
             obs = reset_out[0]
         else:
             obs = reset_out
+        if leibo_collector:
+            if multiagent and isinstance(obs, dict):
+                leibo_collector.begin_episode(list(obs.keys()), episode_index=episodes)
+            else:
+                leibo_collector.begin_episode([_DUMMY_AGENT_ID], episode_index=episodes)
         agent_states = DefaultMapping(lambda agent_id: state_init[mapping_cache[agent_id]])
         prev_actions = DefaultMapping(lambda agent_id: action_init[mapping_cache[agent_id]])
         prev_rewards = collections.defaultdict(lambda: 0.0)
@@ -1090,6 +1519,9 @@ def rollout(
             action = action_dict
 
             action = action if multiagent else action[_DUMMY_AGENT_ID]
+            if leibo_collector:
+                action_view = action if isinstance(action, dict) else {_DUMMY_AGENT_ID: action}
+                leibo_collector.on_actions(action_view, render_env)
             step_out = env.step(action)
             if isinstance(step_out, tuple) and len(step_out) == 5:
                 next_obs, reward, terminations, truncations, info = step_out
@@ -1116,6 +1548,9 @@ def rollout(
                 reward_total += sum(reward.values()) if isinstance(reward, dict) else float(reward)
             else:
                 reward_total += reward
+            if leibo_collector:
+                reward_view = reward if isinstance(reward, dict) else {_DUMMY_AGENT_ID: reward}
+                leibo_collector.on_step(reward_view, render_env)
             if not no_render:
                 if video_dir:
                     rgb_arr = render_env.full_map_to_colors()
@@ -1135,6 +1570,8 @@ def rollout(
             obs = next_obs
         saver.end_rollout()
         print("Episode #{}: reward: {}".format(episodes, reward_total))
+        if leibo_collector:
+            leibo_collector.end_episode(episodes)
         if done:
             episodes += 1
 
@@ -1155,6 +1592,8 @@ def rollout(
 
         # Clean up images
         shutil.rmtree(images_path)
+
+    return leibo_collector.build_report() if leibo_collector else None
 
 
 if __name__ == "__main__":
